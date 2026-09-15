@@ -1,0 +1,80 @@
+{
+  "name": "deepseek-desktop",
+  "version": "0.1.2",
+  "description": "A personal DeepSeek desktop workspace with Chat and Harness modes",
+  "main": "electron/main.cjs",
+  "author": "DeepSeek contributors",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test electron/*.test.cjs electron/tests/*.test.cjs",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --win nsis",
+    "postinstall": "node node_modules/electron/install.js"
+  },
+  "dependencies": {
+    "dompurify": "3.4.15",
+    "marked": "18.0.13"
+  },
+  "devDependencies": {
+    "electron": "44.3.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "studio.deepseek.personal",
+    "productName": "DeepSeek",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*.cjs",
+      "!electron/**/*.test.cjs",
+      "renderer/**/*",
+      "package.json",
+      "LICENSE",
+      "README.md"
+    ],
+    "extraResources": [
+      {
+        "from": "runtime",
+        "to": "runtime",
+        "filter": [
+          "*"
+        ]
+      },
+      {
+        "from": "runtime/node_modules",
+        "to": "runtime/node_modules",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "signExecutable": false,
+      "icon": "renderer/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "artifactName": "DeepSeek.${ext}",
+      "useZip": true,
+      "differentialPackage": false,
+      "include": "scripts/installer.nsh"
+    },
+    "afterPack": "scripts/verify-package.cjs",
+    "executableName": "DeepSeek"
+  }
+}

@@ -1,0 +1,21 @@
+node_modules/
+release/
+runtime/node.exe
+runtime/node
+runtime/*.zip
+runtime/*.tar.gz
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+
+# Local credentials and application data
+*.pem
+*.key
+*.p12
+*.pfx
+user-data/
+harness-home/
+.dsh/
