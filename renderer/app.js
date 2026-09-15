@@ -13,7 +13,7 @@ function icon(name){return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d=
 document.querySelectorAll('[data-icon]').forEach(el=>el.innerHTML=icon(el.dataset.icon));
 const desktop=window.desktop;
 let settings={model:'deepseek-flash',thinking:false,baseUrl:'https://api.deepseek.com',theme:'system',hasApiKey:false,workspace:null};
-let sessions=[],currentId=null,mode='chat',attachment=null,engineState='stopped',pendingDelete=null,toastTimer,saveTimer;
+let sessions=[],currentId=null,mode='chat',attachment=null,engineState='stopped',pendingDelete=null,toastTimer,saveTimer,modelSaving=false;
 const requests=new Map();
 const escapeHTML=(s)=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const cleanError=e=>(e.message||String(e)).replace(/^Error invoking remote method '[^']+': Error: /,'');
@@ -24,7 +24,35 @@ async function persist(){try{if(desktop)await desktop.saveHistory(sessions);else
 function queueSave(){clearTimeout(saveTimer);saveTimer=setTimeout(persist,300);}
 function applyTheme(){const dark=settings.theme==='dark'||(settings.theme==='system'&&matchMedia('(prefers-color-scheme: dark)').matches);document.body.dataset.theme=dark?'dark':'light';}
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change',applyTheme);
-function updateSettingsUI(){applyTheme();$('model-caption').textContent=settings.model==='deepseek-v4-pro'?'DeepSeek V4 Pro':'DeepSeek Flash';$('think-button').setAttribute('aria-pressed',String(settings.thinking));$('project-label').textContent=settings.workspace?settings.workspace.split(/[\\/]/).filter(Boolean).pop():'打开本地项目';$('project-label').title=settings.workspace||'';$('code-workspace').innerHTML=settings.workspace?`${escapeHTML(settings.workspace.split(/[\\/]/).filter(Boolean).pop())}<small>${escapeHTML(settings.workspace)}</small>`:'选择一个项目文件夹<small>代码和项目保留在你的电脑上</small>';}
+function updateModelSelector(){
+  const select=$('model-select');
+  select.querySelector('[data-custom-model]')?.remove();
+  if(![...select.options].some(option=>option.value===settings.model)){
+    const option=new Option(settings.model,settings.model);
+    option.dataset.customModel='true';
+    select.add(option);
+  }
+  select.value=settings.model;
+  select.disabled=modelSaving;
+}
+$('model-select').addEventListener('change',async event=>{
+  const model=event.target.value;
+  const previous=settings.model;
+  if(modelSaving||model===previous)return;
+  settings.model=model;
+  modelSaving=true;
+  updateModelSelector();
+  try{
+    if(desktop)await desktop.saveSettings({model});
+  }catch(error){
+    settings.model=previous;
+    toast('模型选择未保存：'+cleanError(error));
+  }finally{
+    modelSaving=false;
+    updateModelSelector();
+  }
+});
+function updateSettingsUI(){applyTheme();updateModelSelector();$('think-button').setAttribute('aria-pressed',String(settings.thinking));$('project-label').textContent=settings.workspace?settings.workspace.split(/[\\/]/).filter(Boolean).pop():'打开本地项目';$('project-label').title=settings.workspace||'';$('code-workspace').innerHTML=settings.workspace?`${escapeHTML(settings.workspace.split(/[\\/]/).filter(Boolean).pop())}<small>${escapeHTML(settings.workspace)}</small>`:'选择一个项目文件夹<small>代码和项目保留在你的电脑上</small>';}
 function updateBounds(){if(!desktop)return;const rect=$('harness-host').getBoundingClientRect();desktop.setHarnessBounds({x:rect.x,y:rect.y,width:rect.width,height:rect.height}).catch(()=>{});desktop.setHarnessVisible(mode==='codex'&&engineState==='running'&&![...document.querySelectorAll('dialog')].some(x=>x.open)).catch(()=>{});}
 new ResizeObserver(updateBounds).observe($('main')||document.querySelector('.main'));
 new ResizeObserver(updateBounds).observe($('harness-host'));
@@ -42,15 +70,15 @@ desktop?.onHarnessStatus(engineStatus);
 async function workspace(){if(!desktop){toast('选择本地项目需要使用桌面应用。');return;}const selected=await desktop.chooseWorkspace();if(selected){settings.workspace=selected;updateSettingsUI();setMode('codex');if(engineState==='running')toast('已选择新项目；停止当前引擎后重新打开即可切换。');}}
 async function connect(){if(!desktop){toast('请启动桌面应用后打开 Harness 工作区。');return;}if(!settings.workspace){await workspace();if(!settings.workspace)return;}await desktop.connectHarness();}
 async function showDialog(id){if(desktop)await desktop.setHarnessVisible(false);$(id).showModal();}
-function openSettings(){$('api-key').value='';$('api-key').placeholder=settings.hasApiKey?'已保存 · 留空保持现有密钥':'sk-…';$('base-url').value=settings.baseUrl;$('model-select').value=settings.model;$('theme-select').value=settings.theme;$('settings-error').textContent='';$('key-state').textContent=settings.hasApiKey?'密钥已加密保存，填写新密钥可替换。':'密钥加密保存在当前电脑，不会显示在历史记录中。';showDialog('settings-dialog');}
+function openSettings(){$('api-key').value='';$('api-key').placeholder=settings.hasApiKey?'已保存 · 留空保持现有密钥':'sk-…';$('base-url').value=settings.baseUrl;$('theme-select').value=settings.theme;$('settings-error').textContent='';$('key-state').textContent=settings.hasApiKey?'密钥已加密保存，填写新密钥可替换。':'密钥加密保存在当前电脑，不会显示在历史记录中。';showDialog('settings-dialog');}
 document.querySelectorAll('dialog').forEach(dialog=>{dialog.addEventListener('close',()=>{if(dialog.id==='settings-dialog')$('api-key').value='';updateBounds();});dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)dialog.close();}});});
-$('settings-form').addEventListener('submit',async e=>{e.preventDefault();const next={baseUrl:$('base-url').value.trim(),model:$('model-select').value,theme:$('theme-select').value};const key=$('api-key').value.trim();if(key)next.apiKey=key;try{if(desktop)settings=await desktop.saveSettings(next);else{delete next.apiKey;settings={...settings,...next};}updateSettingsUI();$('settings-dialog').close();toast(desktop?'设置已保存':'预览外观已更新；API 设置请在桌面应用中保存。');}catch(error){$('settings-error').textContent=cleanError(error);}});
+$('settings-form').addEventListener('submit',async e=>{e.preventDefault();const next={baseUrl:$('base-url').value.trim(),theme:$('theme-select').value};const key=$('api-key').value.trim();if(key)next.apiKey=key;try{if(desktop){const saved=await desktop.saveSettings(next);settings={...settings,baseUrl:saved.baseUrl,theme:saved.theme,hasApiKey:saved.hasApiKey};}else{delete next.apiKey;settings={...settings,...next};}updateSettingsUI();$('settings-dialog').close();toast(desktop?'设置已保存':'预览外观已更新；API 设置请在桌面应用中保存。');}catch(error){$('settings-error').textContent=cleanError(error);}});
 function renderSearch(){const query=$('search-input').value.toLowerCase();const found=sessions.filter(s=>`${s.title} ${s.messages.map(m=>m.content).join(' ')}`.toLowerCase().includes(query));$('search-results').innerHTML=found.length?found.map(s=>`<button data-session="${escapeHTML(s.id)}">${escapeHTML(s.title)}<small>${escapeHTML(s.messages.find(m=>m.role==='user')?.displayContent||s.messages.find(m=>m.role==='user')?.content||'')}</small></button>`).join(''):'<div class="search-empty">'+(query?'没有找到相关对话':'还没有对话，试着发起第一个问题吧')+'</div>';}
 $('search-input').addEventListener('input',renderSearch);
 function renderAttachment(){$('attachment-chip').classList.toggle('hidden',!attachment);$('attachment-chip').innerHTML=attachment?`<span>📎 ${escapeHTML(attachment.name)} · ${(attachment.size/1024).toFixed(1)} KB</span><button data-action="remove-attachment" aria-label="移除附件">×</button>`:'';}
 $('file-input').addEventListener('change',async e=>{const file=e.target.files[0];if(!file)return;if(file.size>128*1024){toast('请添加 128 KB 以内的文本或代码文件。');e.target.value='';return;}const text=await file.text();if(text.includes('\u0000')){toast('暂时仅支持文本和代码文件。');return;}attachment={name:file.name,text,size:file.size};renderAttachment();e.target.value='';});
 async function exportHistory(){const content=sessions.map(s=>`# ${s.title}\n\n${s.messages.map(m=>`## ${m.role==='user'?'你':'DeepSeek'}\n\n${m.content}${m.reasoning?'\n\n<details><summary>思考过程</summary>\n\n'+m.reasoning+'\n\n</details>':''}`).join('\n\n')}`).join('\n\n---\n\n');if(desktop){const result=await desktop.exportHistory({content:content||'# DeepSeek\n\n暂无对话。',filename:'DeepSeek-对话-'+new Date().toISOString().slice(0,10)+'.md'});if(result.saved)toast('对话已导出。');return;}const blob=new Blob([content||'# DeepSeek\n\n暂无对话。'],{type:'text/markdown;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`DeepSeek-对话-${new Date().toISOString().slice(0,10)}.md`;a.click();setTimeout(()=>URL.revokeObjectURL(url),3000);}
-const actions={chat:()=>setMode('chat'),codex:()=>setMode('codex'),new:newChat,sidebar:()=>{$('app').classList.toggle('sidebar-collapsed');updateBounds();},settings:openSettings,search:()=>{$('search-input').value='';renderSearch();showDialog('search-dialog');},workspace,connect,disconnect:()=>desktop?.disconnectHarness(),send:sendMessage,attach:()=>$('file-input').click(),'remove-attachment':()=>{attachment=null;renderAttachment();},think:async()=>{settings.thinking=!settings.thinking;updateSettingsUI();if(desktop)await desktop.saveSettings({thinking:settings.thinking});},theme:async()=>{settings.theme=document.body.dataset.theme==='dark'?'light':'dark';applyTheme();if(desktop)await desktop.saveSettings({theme:settings.theme});},export:exportHistory,'delete-key':async()=>{if(desktop){settings=await desktop.saveSettings({apiKey:''});openSettingsFieldsOnly();toast('API Key 已移除。');}else toast('预览中没有保存密钥。');}};
+const actions={chat:()=>setMode('chat'),codex:()=>setMode('codex'),new:newChat,sidebar:()=>{$('app').classList.toggle('sidebar-collapsed');updateBounds();},settings:openSettings,search:()=>{$('search-input').value='';renderSearch();showDialog('search-dialog');},workspace,connect,disconnect:()=>desktop?.disconnectHarness(),send:sendMessage,attach:()=>$('file-input').click(),'remove-attachment':()=>{attachment=null;renderAttachment();},think:async()=>{settings.thinking=!settings.thinking;updateSettingsUI();if(desktop)await desktop.saveSettings({thinking:settings.thinking});},theme:async()=>{settings.theme=document.body.dataset.theme==='dark'?'light':'dark';applyTheme();if(desktop)await desktop.saveSettings({theme:settings.theme});},export:exportHistory,'delete-key':async()=>{if(desktop){const saved=await desktop.saveSettings({apiKey:''});settings.hasApiKey=saved.hasApiKey;openSettingsFieldsOnly();toast('API Key 已移除。');}else toast('预览中没有保存密钥。');}};
 function openSettingsFieldsOnly(){$('api-key').value='';$('api-key').placeholder='sk-…';$('key-state').textContent='尚未配置 API Key。';}
 document.addEventListener('click',async e=>{const el=e.target.closest('button,a');if(!el)return;try{if(el.dataset.close){$(el.dataset.close).close();return;}if(el.dataset.action){await actions[el.dataset.action]?.();return;}if(el.dataset.window){if(desktop)await desktop.windowControl(el.dataset.window);return;}if(el.dataset.prompt){$('prompt').value=el.dataset.prompt;$('prompt').focus();return;}if(el.dataset.session){if($('search-dialog').open)$('search-dialog').close();selectSession(el.dataset.session);return;}if(el.dataset.delete){pendingDelete=el.dataset.delete;showDialog('confirm-dialog');return;}if(el.dataset.copy){await navigator.clipboard.writeText(current().messages[Number(el.dataset.copy)].content);toast('回复已复制。');return;}if(el.tagName==='A'){if(el.hasAttribute('download'))return;e.preventDefault();if(desktop)await desktop.openExternal(el.href);else toast('项目地址：https://github.com/deepseek-ai/deepseek-harness');}}catch(error){toast(cleanError(error));}});
 $('confirm-delete').addEventListener('click',async()=>{for(const [id,r]of requests)if(r.sessionId===pendingDelete){await desktop?.cancelChat(id);requests.delete(id);}sessions=sessions.filter(s=>s.id!==pendingDelete);if(currentId===pendingDelete)currentId=null;$('confirm-dialog').close();renderHistory();renderMessages();queueSave();});

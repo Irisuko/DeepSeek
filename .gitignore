@@ -19,3 +19,6 @@ Thumbs.db
 user-data/
 harness-home/
 .dsh/
+
+# Installer copy at the project root
+/DeepSeek.exe

@@ -15,8 +15,9 @@
 ### Chat
 
 1. 打开左下角「设置」，填写自己的 DeepSeek API Key。
-2. 默认 API 地址为 `https://api.deepseek.com`，选择 DeepSeek Flash 或 DeepSeek V4 Pro；输入框下方可独立开启「深度思考」。
-3. 保存后新建对话即可发送消息。可停止生成、查看思考内容、搜索历史、复制回复及导出 Markdown。
+2. 默认 API 地址为 `https://api.deepseek.com`，保存连接设置。
+3. 在对话输入栏底部的模型下拉框中选择 DeepSeek Flash 或 DeepSeek V4 Pro，选择会自动保存；同一输入栏可独立开启「深度思考」。
+4. 输入消息即可发送。可停止生成、查看思考内容、搜索历史、复制回复及导出 Markdown。
 
 Chat 支持添加不超过 128 KB 的文本或代码附件；附件内容随消息发送给配置的 API。对话历史保存在本机，Chat API Key 使用系统安全存储加密后保存。
 
