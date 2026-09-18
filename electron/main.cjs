@@ -325,6 +325,17 @@ function createWindow() {
       spellcheck: false,
     },
   });
+  if (process.platform === 'win32') {
+    // Resolve taskbar branding explicitly: legacy shortcuts can share this
+    // AppUserModelID while pointing to a removed installation.
+    mainWindow.setAppDetails({
+      appId: 'studio.deepseek.personal',
+      appIconPath: app.isPackaged ? process.execPath : path.join(__dirname, '..', 'renderer', 'icon.ico'),
+      appIconIndex: 0,
+      relaunchCommand: app.isPackaged ? '\"' + process.execPath + '\"' : '\"' + process.execPath + '\" \"' + app.getAppPath() + '\"',
+      relaunchDisplayName: 'DeepSeek',
+    });
+  }
   mainWindow.setMenu(null);
   lockSession(mainWindow.webContents.session);
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
