@@ -65,11 +65,11 @@ function createHarnessManager({ runtimeRoot, dataDir, nodePath: runtimeNodePath,
 
   function validateRuntime() {
     if (!fs.existsSync(nodePath) || !fs.existsSync(cliPath)) {
-      throw new Error('Harness 运行环境不完整，请恢复上一引擎或重新安装桌面应用。');
+      throw new Error('Harness 运行环境不完整，请重新安装桌面应用修复引擎。');
     }
     const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
     if (manifest.version !== expectedVersion) {
-      throw new Error('Harness 运行时校验失败，请恢复上一引擎或重新安装桌面应用。');
+      throw new Error('Harness 运行时校验失败，请重新安装桌面应用修复引擎。');
     }
     fs.mkdirSync(harnessHome, { recursive: true });
   }

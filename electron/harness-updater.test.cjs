@@ -40,7 +40,7 @@ function fixture(t, options = {}) {
   const validations = [];
   const behavior = { stopped: true, version: '0.1.6-alpha.2', ...options };
   const config = {
-    bundledRuntimeRoot, dataDir,
+    bundledRuntimeRoot, dataDir, installedRuntime: options.installedRuntime !== false,
     isHarnessStopped: () => behavior.stopped,
     onStatus: status => statuses.push(status),
     fetchImpl: async (url, init) => {
@@ -58,6 +58,8 @@ function fixture(t, options = {}) {
     runProcess: async (executable, args, init) => {
       commands.push({ executable, args, init });
       if (behavior.process) return behavior.process(executable, args, init);
+      fs.mkdirSync(init.env.npm_config_cache, { recursive: true });
+      fs.writeFileSync(path.join(init.env.npm_config_cache, 'download.tmp'), 'fixture download');
       if (args[1] === 'install') installFixture(init.cwd, behavior.version, behavior.integrity || SRI);
       if (behavior.installError) throw new Error(behavior.installError);
     },
@@ -66,8 +68,10 @@ function fixture(t, options = {}) {
       if (behavior.validate) await behavior.validate(candidate);
     },
   };
+  const updateRoot = path.join(config.installedRuntime ? bundledRuntimeRoot : dataDir, 'harness-updates');
+  fs.mkdirSync(updateRoot, { recursive: true });
   return { updater: createHarnessUpdater(config), config, behavior, root, bundledRuntimeRoot, dataDir,
-    requests, commands, statuses, validations, stateFile: path.join(dataDir, 'harness-updates', 'active.json') };
+    requests, commands, statuses, validations, stateFile: path.join(updateRoot, 'active.json') };
 }
 
 test('latest official CLI release includes previews and ignores drafts and unrelated tags', () => {
@@ -80,36 +84,26 @@ test('latest official CLI release includes previews and ignores drafts and unrel
   ]).version, '0.1.6-alpha.2');
 });
 
-test('verified staged install persists selection, leaves bundle intact, and supports rollback', async t => {
-  const f = fixture(t);
-  await f.updater.initialize();
-  const bundled = f.updater.getRuntime();
-  const status = await f.updater.update();
-  assert.equal(status.state, 'ready');
-  assert.equal(status.canRollback, true);
-  assert.equal(status.prerelease, true);
-  const updated = f.updater.getRuntime();
-  assert.notEqual(updated.runtimeRoot, bundled.runtimeRoot);
-  assert.equal(updated.nodePath, bundled.nodePath);
-  assert.equal(updated.expectedVersion, '0.1.6-alpha.2');
-  assert.equal(JSON.parse(fs.readFileSync(path.join(f.bundledRuntimeRoot, 'node_modules/@deepseek-ai/dsh/package.json'))).version, '0.1.5-rc.1');
-  assert.equal(f.validations.length, 1);
-  assert.equal(f.commands.length, 2);
-  assert.ok(f.commands[0].args.includes('--ignore-scripts'));
-  assert.equal(f.commands[1].args[1], 'rebuild');
-  assert.equal(f.commands[1].args.includes('--dangerously-allow-all-scripts'), false);
-  assert.equal(f.commands[1].args.includes('@google/genai'), false);
-  assert.equal(f.commands[0].init.cwd, updated.runtimeRoot);
-  const restarted = createHarnessUpdater(f.config);
-  await restarted.initialize();
-  assert.deepEqual(restarted.getRuntime(), updated);
-  await restarted.rollback();
-  assert.deepEqual(restarted.getRuntime(), bundled);
-  const restartedAgain = createHarnessUpdater(f.config);
-  await restartedAgain.initialize();
-  assert.deepEqual(restartedAgain.getRuntime(), bundled);
-  await restartedAgain.rollback();
-  assert.deepEqual(restartedAgain.getRuntime(), updated);
+test('verified install deletes old bundled engine, retains tools, and survives fresh-profile restart', async t => {
+  const f = fixture(t); await f.updater.initialize();
+  const original=f.updater.getRuntime();
+  const status=await f.updater.update();
+  assert.equal(status.state,'ready'); assert.equal(status.cleanupPending,false);
+  assert.equal(typeof f.updater.rollback,'undefined');
+  const current=f.updater.getRuntime();
+  assert.notEqual(current.runtimeRoot,original.runtimeRoot);
+  assert.equal(current.nodePath,original.nodePath);
+  assert.equal(fs.existsSync(path.join(f.bundledRuntimeRoot,'node_modules')),false);
+  assert.equal(fs.existsSync(current.nodePath),true);
+  assert.equal(fs.existsSync(path.join(f.bundledRuntimeRoot,'npm/bin/npm-cli.js')),true);
+  assert.equal(fs.existsSync(path.join(current.runtimeRoot,'npm-cache')),false);
+  assert.equal(f.commands.length,2); assert.equal(f.validations.length,1);
+  assert(f.commands[0].args.includes('--ignore-scripts'));
+  assert(!f.commands[1].args.includes('@google/genai'));
+  const saved=JSON.parse(fs.readFileSync(f.stateFile));
+  assert.equal(saved.schema,2); assert.equal(saved.previous,undefined);
+  const restarted=createHarnessUpdater({...f.config,dataDir:path.join(f.root,'new-profile')});
+  await restarted.initialize(); assert.deepEqual(restarted.getRuntime(),current);
 });
 
 test('running engine blocks update without any download or process side effect', async t => {
@@ -141,7 +135,7 @@ test('native or startup smoke failure never activates the candidate', async t =>
   await assert.rejects(f.updater.update(), /native smoke failed/);
   assert.equal(f.updater.getRuntime().runtimeRoot, f.bundledRuntimeRoot);
   assert.equal(fs.existsSync(f.stateFile), false);
-  assert.equal(f.updater.getStatus().canRollback, false);
+  assert.equal(typeof f.updater.rollback, 'undefined');
 });
 
 test('SRI mismatch rejects before native lifecycle hooks and validation', async t => {
@@ -264,4 +258,117 @@ test('npm receives isolated config and excludes inherited credentials and inject
     for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
     Object.assign(process.env, previous);
   }
+});
+
+test('success removes previous downloads and legacy cache without modifying conversations', async t => {
+  const f=fixture(t); await f.updater.initialize(); await f.updater.update();
+  const previous=f.updater.getRuntime().runtimeRoot;
+  const legacy=path.join(f.dataDir,'harness-updates');
+  fs.mkdirSync(path.join(legacy,'npm-cache'),{recursive:true});
+  fs.writeFileSync(path.join(legacy,'npm-cache/download.tmp'),'residue');
+  fs.writeFileSync(path.join(f.dataDir,'history.json'),'conversation');
+  f.behavior.version='0.1.6-alpha.3'; await f.updater.update();
+  assert.equal(fs.existsSync(previous),false);
+  assert.equal(fs.existsSync(path.join(legacy,'npm-cache')),false);
+  assert.equal(fs.readFileSync(path.join(f.dataDir,'history.json'),'utf8'),'conversation');
+  assert.equal(fs.readdirSync(path.dirname(f.stateFile)).filter(n=>n.startsWith('runtime-')).length,1);
+});
+
+test('same-release legacy engine migrates only after validation, then removes legacy and bundle', async t => {
+  const f=fixture(t); const legacy=path.join(f.dataDir,'harness-updates');
+  const directory='runtime-11111111-1111-1111-1111-111111111111';
+  installFixture(path.join(legacy,directory),f.behavior.version);
+  fs.writeFileSync(path.join(legacy,'active.json'),JSON.stringify({schema:1,current:{directory,version:f.behavior.version},canRollback:true}));
+  await f.updater.initialize(); assert.equal(f.updater.getRuntime().runtimeRoot,path.join(legacy,directory));
+  f.behavior.validate=async()=>{throw new Error('migration smoke failed');};
+  await assert.rejects(f.updater.update(),/migration smoke failed/);
+  assert(fs.existsSync(path.join(legacy,directory))); assert(!fs.existsSync(f.stateFile));
+  f.behavior.validate=null; const result=await f.updater.update();
+  assert.equal(result.state,'ready'); assert.equal(f.commands.length,0);
+  assert(!fs.existsSync(path.join(legacy,directory))); assert(!fs.existsSync(path.join(legacy,'active.json')));
+  assert(!fs.existsSync(path.join(f.bundledRuntimeRoot,'node_modules')));
+});
+
+test('locked obsolete files report successful activation with pending cleanup and retry at startup', async t => {
+  const f=fixture(t); await f.updater.initialize();
+  const original=fs.promises.rm;
+  fs.promises.rm=async function(target,...args){if(target===path.join(f.bundledRuntimeRoot,'node_modules'))throw Object.assign(new Error('locked'),{code:'EPERM'});return original.call(this,target,...args);};
+  let result;
+  try { result=await f.updater.update(); } finally { fs.promises.rm=original; }
+  assert.equal(result.state,'ready'); assert.equal(result.cleanupPending,true);
+  const selected=f.updater.getRuntime();
+  const restarted=createHarnessUpdater(f.config); await restarted.initialize();
+  assert.deepEqual(restarted.getRuntime(),selected);
+  assert.equal(restarted.getStatus().cleanupPending,false);
+  assert(!fs.existsSync(path.join(f.bundledRuntimeRoot,'node_modules')));
+});
+
+test('atomic pointer failure preserves old engine and cleans all candidate download data', async t => {
+  const f=fixture(t); await f.updater.initialize(); const selected=f.updater.getRuntime();
+  const original=fs.promises.rename;
+  fs.promises.rename=async function(from,to){if(to===f.stateFile)throw new Error('commit denied');return original.call(this,from,to);};
+  try {await assert.rejects(f.updater.update(),/commit denied/);} finally {fs.promises.rename=original;}
+  assert.deepEqual(f.updater.getRuntime(),selected);
+  assert.deepEqual(fs.readdirSync(path.dirname(f.stateFile)),[]);
+});
+
+test('cancel while validating removes candidate cache and keeps the original selection', async t => {
+  let started; const waiting=new Promise(r=>{started=r;});
+  const f=fixture(t,{validate:({signal})=>new Promise((_,reject)=>{started();signal.addEventListener('abort',()=>reject(Object.assign(new Error('cancelled'),{name:'AbortError'})),{once:true});})});
+  await f.updater.initialize(); const original=f.updater.getRuntime();
+  const promise=f.updater.update(); const rejected=assert.rejects(promise,/cancelled/);
+  await waiting; await f.updater.cancel(); await rejected;
+  assert.deepEqual(f.updater.getRuntime(),original);
+  assert.deepEqual(fs.readdirSync(path.dirname(f.stateFile)),[]);
+  assert.equal(f.updater.getStatus().state,'cancelled');
+});
+
+test('a late cancel at commit cannot undo activation or stop obsolete cleanup', async t => {
+  const f=fixture(t); let cancelled;
+  const updater=createHarnessUpdater({...f.config,onStatus:s=>{if(s.state==='cleaning'){assert.equal(s.canCancel,false);cancelled=updater.cancel();}}});
+  await updater.initialize(); const result=await updater.update(); await cancelled;
+  assert.equal(result.state,'ready'); assert.equal(updater.getStatus().state,'ready');
+  assert(!fs.existsSync(path.join(f.bundledRuntimeRoot,'node_modules')));
+});
+
+test('unconfirmed process termination defers cleanup instead of deleting a live writer directory', async t => {
+  const f=fixture(t,{process:async()=>{throw Object.assign(new Error('unconfirmed'),{processMayBeRunning:true});}});
+  await f.updater.initialize(); await assert.rejects(f.updater.update(),/unconfirmed/);
+  assert.equal(f.updater.getStatus().cleanupPending,true);
+  const entries=fs.readdirSync(path.dirname(f.stateFile)).filter(n=>n.startsWith('runtime-'));
+  assert.equal(entries.length,1);
+  const restarted=createHarnessUpdater(f.config); await restarted.initialize();
+  assert(fs.existsSync(path.join(path.dirname(f.stateFile),entries[0])));
+  assert.equal(restarted.getStatus().cleanupPending,true);
+});
+
+test('development updates leave source dependencies available for rebuilding installers', async t => {
+  const f=fixture(t,{installedRuntime:false}); await f.updater.initialize(); await f.updater.update();
+  assert(fs.existsSync(path.join(f.bundledRuntimeRoot,'node_modules')));
+  assert.equal(path.dirname(f.updater.getRuntime().runtimeRoot),path.join(f.dataDir,'harness-updates'));
+});
+
+test('cleanup unlinks obsolete junctions without touching their external targets', async t => {
+  const f=fixture(t); await f.updater.initialize();
+  const external=path.join(f.root,'external'); fs.mkdirSync(external);fs.writeFileSync(path.join(external,'keep.txt'),'untouched');
+  const obsolete=path.join(path.dirname(f.stateFile),'runtime-22222222-2222-2222-2222-222222222222');
+  fs.symlinkSync(external,obsolete,process.platform==='win32'?'junction':'dir');
+  await f.updater.update();
+  assert(!fs.existsSync(obsolete)); assert.equal(fs.readFileSync(path.join(external,'keep.txt'),'utf8'),'untouched');
+});
+
+test('corrupt installed pointer after bundle removal requires repair and never selects an orphan', async t => {
+  const f=fixture(t);await f.updater.initialize();await f.updater.update();
+  fs.writeFileSync(f.stateFile,'broken');
+  const restarted=createHarnessUpdater(f.config);
+  await assert.rejects(restarted.initialize(),/重新安装 DeepSeek/);
+  assert.equal(foldersForTest(path.dirname(f.stateFile)).length,1);
+});
+function foldersForTest(root){return fs.readdirSync(root).filter(name=>name.startsWith('runtime-'));}
+
+test('a protected installation rejects update before any network request and preserves the bundle', async t => {
+  const f=fixture(t);await f.updater.initialize();const original=fs.promises.mkdir;
+  fs.promises.mkdir=async function(target,...args){if(target===path.dirname(f.stateFile))throw Object.assign(new Error('protected'),{code:'EACCES'});return original.call(this,target,...args);};
+  try{await assert.rejects(f.updater.update(),/安装目录不可写/);}finally{fs.promises.mkdir=original;}
+  assert.equal(f.requests.length,0);assert.equal(f.updater.getRuntime().runtimeRoot,f.bundledRuntimeRoot);
 });

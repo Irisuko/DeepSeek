@@ -8,6 +8,7 @@ const { streamChat, validateMessages, validateModel, validateThinking, validateH
 const { createHarnessManager } = require('./harness-manager.cjs');
 const { configureAppIdentity } = require('./app-identity.cjs');
 const { createHarnessUpdater } = require('./harness-updater.cjs');
+const { acquireInstallationLock } = require('./harness-installation-lock.cjs');
 const { createHarnessRuntimeValidator } = require('./harness-runtime-validator.cjs');
 
 const rendererFile = path.join(__dirname, '..', 'renderer', 'index.html');
@@ -17,6 +18,7 @@ let mainWindow;
 let storage;
 let harness;
 let harnessUpdater;
+let harnessInstallationLock;
 let harnessOperation = false;
 let harnessView = null;
 let mode = 'chat';
@@ -139,7 +141,7 @@ function createCurrentHarnessManager() {
 
 async function changeHarnessRuntime(operation) {
   if (harnessOperation || harnessUpdater.getStatus().busy) throw new Error('Harness 更新正在进行，请稍候。');
-  if (harness.isActive()) throw new Error('请先结束任务并停止 Harness 引擎，再更新或恢复。');
+  if (harness.isActive()) throw new Error('请先结束任务并停止 Harness 引擎，再更新。');
   harnessOperation = true;
   harnessGeneration += 1;
   try {
@@ -154,7 +156,6 @@ function wireIPC() {
   handle('desktop:harness-check-update', () => harnessUpdater.check());
   handle('desktop:harness-update', () => changeHarnessRuntime(() => harnessUpdater.update()));
   handle('desktop:harness-cancel-update', () => harnessUpdater.cancel());
-  handle('desktop:harness-rollback', () => changeHarnessRuntime(() => harnessUpdater.rollback()));
   handle('desktop:get-settings', () => storage.publicSettings());
   handle('desktop:save-settings', async (_event, settings) => {
     const saved = await storage.saveSettings(settings);
@@ -381,8 +382,10 @@ else {
     await storage.initialize();
     nativeTheme.themeSource = storage.settings.theme;
     const bundledRuntimeRoot = path.join(app.isPackaged ? process.resourcesPath : path.join(__dirname, '..'), 'runtime');
+    if (app.isPackaged) harnessInstallationLock = await acquireInstallationLock(bundledRuntimeRoot);
     harnessUpdater = createHarnessUpdater({
       bundledRuntimeRoot,
+      installedRuntime: app.isPackaged,
       dataDir: app.getPath('userData'),
       fetchImpl: (url, options) => net.fetch(url, options),
       isHarnessStopped: () => !harness?.isActive(),
@@ -399,6 +402,7 @@ else {
     dialog.showErrorBox('启动失败', publicError(error, '应用无法启动，请重新安装后重试。'));
     app.quit();
   });
+  app.on('will-quit', () => { void harnessInstallationLock?.release(); });
   app.on('activate', () => { if (!mainWindow && storage && harness) createWindow(); });
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
   app.on('before-quit', (event) => {

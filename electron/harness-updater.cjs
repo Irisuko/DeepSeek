@@ -125,37 +125,44 @@ function runProcess(executable, args, { cwd, env, signal, timeoutMs = 15 * 60_00
 }
 
 /**
- * Updates the official Harness engine only. Candidate installs are immutable,
- * and the bundled runtime remains the fallback. The caller supplies an isolated
- * smoke validator so no candidate process touches the user's Harness profile.
+ * Package installations share one selected engine across profiles. Only the
+ * atomic pointer write activates a candidate; cleanup happens after that commit.
+ * Development runs keep their source bundle and store updates in the profile.
+ * The caller must hold an installation lifetime lock when installedRuntime=true.
  */
-function createHarnessUpdater({ bundledRuntimeRoot, dataDir, onStatus = () => {},
+function createHarnessUpdater({ bundledRuntimeRoot, dataDir, installedRuntime = false, onStatus = () => {},
   isHarnessStopped = () => true, validateCandidate,
   fetchImpl = globalThis.fetch, runProcess: execute = runProcess }) {
   if (!path.isAbsolute(bundledRuntimeRoot) || !path.isAbsolute(dataDir)) throw new Error('Harness 更新目录必须是绝对路径。');
   if (typeof validateCandidate !== 'function') throw new Error('Harness 更新必须配置独立的运行环境验证。');
-  const updateRoot = path.join(dataDir, 'harness-updates');
+  bundledRuntimeRoot = path.resolve(bundledRuntimeRoot);
+  const legacyRoot = path.join(path.resolve(dataDir), 'harness-updates');
+  const updateRoot = installedRuntime ? path.join(bundledRuntimeRoot, 'harness-updates') : legacyRoot;
   const stateFile = path.join(updateRoot, 'active.json');
   const nodePath = path.join(bundledRuntimeRoot, process.platform === 'win32' ? 'node.exe' : 'node');
   const npmCli = path.join(bundledRuntimeRoot, 'npm', 'bin', 'npm-cli.js');
+  const bootTime = Date.now() - require('node:os').uptime() * 1000;
   let semver;
+  let active = null;
+  let activeRoot = updateRoot;
+  let latest = null;
+  let operation = null;
+  let shuttingDown = false;
+  let cleanupPending = false;
+  let status = { state: 'idle', busy: false, canCancel: false, message: '更新到官方最新发布（包含预发布）。' };
+
+  function bundledVersion() { return readRuntimeVersion(bundledRuntimeRoot); }
+  function currentVersion() { return active?.version || bundledVersion(); }
   function isNewer(version) {
     try { semver ||= require(path.join(bundledRuntimeRoot, 'npm', 'node_modules', 'semver')); }
     catch { throw new Error('此安装包缺少 Harness 更新工具，请安装新版 DeepSeek 后重试。'); }
     if (!semver.valid(version)) throw new Error('官方 Harness 发布标签不是有效的版本标识。');
-    return semver.gt(version, active?.version || bundledVersion);
+    return semver.gt(version, currentVersion());
   }
-  const bundledVersion = readRuntimeVersion(bundledRuntimeRoot);
-  let active = null;
-  let previous = null;
-  let canRollback = false;
-  let latest = null;
-  let operation = null;
-  let shuttingDown = false;
-  let status = { state: 'idle', busy: false, message: '更新到官方最新发布（包含预发布）。' };
-
   function getStatus() {
-    return { ...status, canRollback, currentVersion: active?.version || bundledVersion,
+    let version = active?.version || null;
+    try { version ||= bundledVersion(); } catch { /* A corrupt install reports its repair error. */ }
+    return { ...status, cleanupPending, currentVersion: version,
       latestVersion: latest?.version || null, releaseUrl: latest?.releaseUrl || active?.releaseUrl || null,
       prerelease: latest?.prerelease ?? active?.prerelease ?? false };
   }
@@ -163,12 +170,17 @@ function createHarnessUpdater({ bundledRuntimeRoot, dataDir, onStatus = () => {}
     status = { ...status, ...patch };
     try { onStatus(getStatus()); } catch { /* Closing windows cannot break updates. */ }
   }
-  function resolveDescriptor(descriptor) {
-    if (!descriptor) return { runtimeRoot: bundledRuntimeRoot, nodePath, expectedVersion: bundledVersion };
+  function assertRoot(root) {
+    const stat = fs.lstatSync(root, { throwIfNoEntry: false });
+    if (!stat?.isDirectory() || stat.isSymbolicLink()) throw new Error('Harness 更新目录无效，请重新安装应用。');
+    return fs.realpathSync(root);
+  }
+  function resolveDescriptor(descriptor, root = activeRoot) {
+    if (!descriptor) return { runtimeRoot: bundledRuntimeRoot, nodePath, expectedVersion: bundledVersion() };
     if (!DIRECTORY.test(descriptor.directory) || !safeVersion(descriptor.version)) throw new Error('Harness 更新记录无效。');
-    const runtimeRoot = path.join(updateRoot, descriptor.directory);
+    const runtimeRoot = path.join(root, descriptor.directory);
     const actual = fs.realpathSync(runtimeRoot);
-    const expectedParent = fs.realpathSync(updateRoot);
+    const expectedParent = assertRoot(root);
     if (fs.lstatSync(runtimeRoot).isSymbolicLink() || path.dirname(actual).toLowerCase() !== expectedParent.toLowerCase()) {
       throw new Error('Harness 更新目录无效。');
     }
@@ -177,31 +189,118 @@ function createHarnessUpdater({ bundledRuntimeRoot, dataDir, onStatus = () => {}
   }
   function getRuntime() { return resolveDescriptor(active); }
   function assertStopped() {
-    if (!isHarnessStopped()) throw new Error('请先停止 Harness 引擎，再更新或恢复；正在执行的任务不会被自动中断。');
+    if (!isHarnessStopped()) throw new Error('请先停止 Harness 引擎，再更新；正在执行的任务不会被自动中断。');
+  }
+  async function removeChild(root, name) {
+    // Every deletion is a named immediate child of a validated owned directory.
+    // Junctions/symlinks are unlinked themselves; their targets are never followed.
+    if (!name || name !== path.basename(name) || name === '.' || name === '..') throw new Error('Harness 清理路径无效。');
+    const parent = assertRoot(root);
+    const target = path.join(root, name);
+    const stat = await fs.promises.lstat(target).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+    if (!stat) return;
+    if (stat.isSymbolicLink()) { await fs.promises.unlink(target); return; }
+    const actual = await fs.promises.realpath(target);
+    if (path.dirname(actual).toLowerCase() !== parent.toLowerCase()) throw new Error('Harness 清理目录越界。');
+    await fs.promises.rm(target, { recursive: stat.isDirectory(), force: true, maxRetries: 2, retryDelay: 150 });
+  }
+  function canRemoveCandidate(root) {
+    const marker = path.join(root, '.attempt.json');
+    if (!fs.existsSync(marker)) return true;
+    try {
+      const saved = JSON.parse(fs.readFileSync(marker, 'utf8'));
+      // A reboot proves even detached grandchildren from an interrupted npm or
+      // smoke process are gone. A mere desktop-app restart cannot prove that.
+      return saved.schema === 1 && (saved.unsafe !== true
+        || (Number.isFinite(saved.bootTime) && bootTime - saved.bootTime > 10_000 && require('node:os').uptime() < saved.uptime));
+    } catch { return false; }
+  }
+  async function cleanup({ removeObsolete = false } = {}) {
+    const failures = [];
+    const roots = [...new Set([updateRoot, legacyRoot])];
+    for (const root of roots) {
+      if (!fs.existsSync(root)) continue;
+      let names;
+      try { assertRoot(root); names = await fs.promises.readdir(root); }
+      catch { failures.push('目录不可访问'); continue; }
+      for (const name of names) {
+        const selected = active && root === activeRoot && name === active.directory;
+        if (selected) continue;
+        const candidate = DIRECTORY.test(name);
+        const interrupted = candidate && fs.existsSync(path.join(root, name, '.attempt.json'));
+        const residue = name === 'npm-cache' || name === 'global.npmrc' || /^active-[a-f0-9-]{36}\.tmp$/.test(name);
+        if (!(residue || (candidate && (removeObsolete || interrupted)))) continue;
+        try {
+          if (candidate && !canRemoveCandidate(path.join(root, name))) throw new Error('更新进程未确认退出');
+          await removeChild(root, name);
+        } catch { failures.push(name); }
+      }
+      // A legacy selection remains recoverable until its replacement is committed.
+      if (removeObsolete && root !== updateRoot && activeRoot === updateRoot) {
+        try { await removeChild(root, 'active.json'); } catch { failures.push('旧记录'); }
+      }
+    }
+    if (active && activeRoot === updateRoot) {
+      const selectedRoot = path.join(updateRoot, active.directory);
+      for (const name of ['npm-cache', '.npmrc', 'global.npmrc', '.attempt.json']) {
+        try { await removeChild(selectedRoot, name); } catch { failures.push(name); }
+      }
+    }
+    if (removeObsolete && installedRuntime && active && activeRoot === updateRoot) {
+      try { await removeChild(bundledRuntimeRoot, 'node_modules'); } catch { failures.push('内置旧引擎'); }
+    }
+    cleanupPending = failures.length > 0;
+    return cleanupPending;
+  }
+  function cleanupNote() {
+    return cleanupPending ? ' 部分残留暂时无法清理，将在下次启动重试；未确认停止的更新进程需要重启电脑后清理。' : '';
   }
   async function initialize() {
-    await fs.promises.mkdir(updateRoot, { recursive: true });
-    if (!fs.existsSync(stateFile)) return getRuntime();
-    try {
-      const saved = JSON.parse(await fs.promises.readFile(stateFile, 'utf8'));
-      if (saved.schema !== 1) throw new Error('Unknown update state');
-      resolveDescriptor(saved.current);
-      active = saved.current || null;
-      try { resolveDescriptor(saved.previous); previous = saved.previous || null; canRollback = saved.canRollback === true; }
-      catch { previous = null; canRollback = Boolean(active); }
-      publish({ state: 'idle', message: active ? '正在使用已安装的 Harness 更新。' : '正在使用内置 Harness。' });
-    } catch {
-      active = null;
-      previous = null;
-      canRollback = false;
-      publish({ state: 'error', message: '上次的 Harness 更新记录不完整，已使用内置引擎。可重新检查更新。' });
+    // Reading a valid installed selection must not depend on the deleted bundle.
+    let savedError = false;
+    let committedSelection = false;
+    const sources = installedRuntime ? [updateRoot, legacyRoot] : [updateRoot];
+    for (const root of sources) {
+      if (!fs.existsSync(path.join(root, 'active.json'))) continue;
+      try {
+        const saved = JSON.parse(await fs.promises.readFile(path.join(root, 'active.json'), 'utf8'));
+        if (![1, 2].includes(saved.schema)) throw new Error('Unknown update state');
+        resolveDescriptor(saved.current, root);
+        active = saved.current || null;
+        activeRoot = root;
+        committedSelection = root === updateRoot && saved.schema === 2 && Boolean(active);
+        break;
+      } catch {
+        savedError = true;
+        // Never replace a corrupt installation-wide pointer with an older
+        // per-profile selection once its original bundle has been removed.
+        if (root === updateRoot && installedRuntime) break;
+      }
     }
-    return getRuntime();
+    let runtime;
+    try { runtime = getRuntime(); }
+    catch { throw new Error('Harness 引擎记录或程序文件不完整，请重新安装 DeepSeek 修复。会话数据仍保留。'); }
+    // No download occurs on startup. A committed schema2 pointer is sufficient
+    // evidence to retry cleanup after a crash between commit and deletion.
+    await cleanup({ removeObsolete: committedSelection });
+    publish({ state: savedError ? 'error' : 'idle', busy: false, canCancel: false,
+      message: (savedError ? '上次的 Harness 更新记录不完整，已使用内置引擎。可重新检查更新。'
+        : active ? '正在使用已安装的 Harness 更新。' : '正在使用内置 Harness。') + cleanupNote() });
+    return runtime;
   }
-  async function writeState(next, prior, rollbackAvailable) {
+  async function prepareStore() {
+    try { await fs.promises.mkdir(updateRoot, { recursive: true }); assertRoot(updateRoot); }
+    catch { throw new Error('当前安装目录不可写，无法更新 Harness。请将 DeepSeek 安装到当前用户有写入权限的目录。原引擎保持不变。'); }
+    // Detect a protected installation before contacting or downloading packages.
+    const probe = path.join(updateRoot, `active-${crypto.randomUUID()}.tmp`);
+    try { await fs.promises.writeFile(probe, '', { flag: 'wx' }); }
+    catch { throw new Error('当前安装目录不可写，无法更新 Harness。请将 DeepSeek 安装到当前用户有写入权限的目录。原引擎保持不变。'); }
+    finally { await fs.promises.rm(probe, { force: true }).catch(() => {}); }
+  }
+  async function writeState(next) {
     const temporary = path.join(updateRoot, `active-${crypto.randomUUID()}.tmp`);
     try {
-      await fs.promises.writeFile(temporary, JSON.stringify({ schema: 1, current: next, previous: prior, canRollback: rollbackAvailable }, null, 2), { encoding: 'utf8', flag: 'wx' });
+      await fs.promises.writeFile(temporary, JSON.stringify({ schema: 2, current: next }, null, 2), { encoding: 'utf8', flag: 'wx' });
       await fs.promises.rename(temporary, stateFile);
     } finally { await fs.promises.rm(temporary, { force: true }).catch(() => {}); }
   }
@@ -260,119 +359,152 @@ function createHarnessUpdater({ bundledRuntimeRoot, dataDir, onStatus = () => {}
     }
     return metadata;
   }
+
   function begin(work) {
     if (shuttingDown) return Promise.reject(new Error('应用正在退出，请下次启动后重试。'));
     if (operation) return Promise.reject(new Error('已有 Harness 更新操作正在进行，请稍候。'));
     const controller = new AbortController();
-    const record = { controller, promise: null };
+    const record = { controller, promise: null, committing: false };
     operation = record;
-    record.promise = Promise.resolve().then(() => work(controller.signal)).catch(error => {
+    record.promise = Promise.resolve().then(() => work(controller.signal, record)).catch(error => {
       const cancelled = error.name === 'AbortError';
-      publish({ state: cancelled ? 'cancelled' : 'error', busy: false,
-        message: cancelled ? 'Harness 更新已取消，原引擎保持不变。' : sanitizeOutput(error.message).slice(-1_500) });
+      publish({ state: cancelled ? 'cancelled' : 'error', busy: false, canCancel: false,
+        message: (cancelled ? 'Harness 更新已取消，原引擎保持不变。' : sanitizeOutput(error.message).slice(-1_500)) + cleanupNote() });
       throw error;
     }).finally(() => { if (operation === record) operation = null; });
     return record.promise;
   }
   function check() {
     return begin(async signal => {
-      publish({ state: 'checking', busy: true, message: '正在检查官方 Harness 发布…' });
+      publish({ state: 'checking', busy: true, canCancel: true, message: '正在检查官方 Harness 发布…' });
       const release = await discover(signal);
       throwIfAborted(signal);
       const available = isNewer(release.version);
-      publish({ state: available ? 'available' : 'current', busy: false,
-        message: available ? '发现官方 Harness 更新，可点击更新。' : release.version === (active?.version || bundledVersion)
-          ? 'Harness 已与官方最新发布一致。' : '当前 Harness 已更新，无需安装较早的官方发布。' });
+      publish({ state: available ? 'available' : 'current', busy: false, canCancel: false,
+        message: (available ? '发现官方 Harness 更新，可点击更新。' : release.version === currentVersion()
+          ? 'Harness 已与官方最新发布一致。' : '当前 Harness 已更新，无需安装较早的官方发布。') + cleanupNote() });
       return getStatus();
     });
   }
   function update() {
-    return begin(async signal => {
+    return begin(async (signal, record) => {
       assertStopped();
-      publish({ state: 'checking', busy: true, message: '正在检查官方 Harness 发布…' });
+      await prepareStore();
+      await cleanup({ removeObsolete: Boolean(active && activeRoot === updateRoot) });
+      throwIfAborted(signal);
+      publish({ state: 'checking', busy: true, canCancel: true, message: '正在检查官方 Harness 发布…' });
       const release = await discover(signal);
-      if (!isNewer(release.version)) {
-        publish({ state: 'current', busy: false, message: release.version === (active?.version || bundledVersion)
-          ? 'Harness 已与官方最新发布一致。' : '当前 Harness 已更新，无需安装较早的官方发布。' });
+      const newer = isNewer(release.version);
+      const migrate = installedRuntime && active && activeRoot !== updateRoot;
+      if (!newer && !migrate) {
+        publish({ state: 'current', busy: false, canCancel: false,
+          message: (release.version === currentVersion() ? 'Harness 已与官方最新发布一致。'
+            : '当前 Harness 已更新，无需安装较早的官方发布。') + cleanupNote() });
         return getStatus();
       }
-      const metadata = await validateRegistry(release, signal);
+      const metadata = newer ? await validateRegistry(release, signal) : null;
       throwIfAborted(signal);
-      if (!fs.existsSync(npmCli) || !fs.existsSync(nodePath)) throw new Error('此安装包缺少 Harness 更新工具，请安装新版 DeepSeek 后重试。');
+      if (!fs.existsSync(nodePath) || (newer && !fs.existsSync(npmCli))) throw new Error('此安装包缺少 Harness 更新工具，请安装新版 DeepSeek 后重试。');
       assertStopped();
       const directory = `runtime-${crypto.randomUUID()}`;
       const runtimeRoot = path.join(updateRoot, directory);
-      let committed = false;
       let created = false;
+      let committed = false;
+      let unsafe = false;
+      function markUnsafe(value) {
+        unsafe = value;
+        fs.writeFileSync(path.join(runtimeRoot, '.attempt.json'), JSON.stringify({ schema: 1, unsafe, bootTime, uptime: require('node:os').uptime() }));
+      }
+      async function subprocess(work) {
+        markUnsafe(true);
+        try { const result = await work(); markUnsafe(false); return result; }
+        catch (error) { if (!error.processMayBeRunning) markUnsafe(false); throw error; }
+      }
       try {
         await fs.promises.mkdir(runtimeRoot, { recursive: false });
         created = true;
-        await fs.promises.writeFile(path.join(runtimeRoot, 'package.json'), JSON.stringify({
-          name: 'deepseek-harness-runtime', version: '0.0.0', private: true,
-          dependencies: { [PACKAGE]: release.version }, allowScripts: ALLOWED_SCRIPTS,
-        }, null, 2));
-        await fs.promises.writeFile(path.join(runtimeRoot, '.npmrc'), `registry=${REGISTRY}\n`);
-        await fs.promises.writeFile(path.join(updateRoot, 'global.npmrc'), '');
-        const options = { cwd: runtimeRoot, env: npmEnvironment(nodePath, runtimeRoot, updateRoot), signal };
-        const shared = [`--registry=${REGISTRY}`, '--no-audit', '--no-fund', '--no-progress', '--engine-strict'];
-        publish({ state: 'downloading', busy: true, message: '正在下载官方 Harness 与依赖，首次可能需要几分钟…' });
-        await execute(nodePath, [npmCli, 'install', '--ignore-scripts', ...shared], options);
-        throwIfAborted(signal);
-        readRuntimeVersion(runtimeRoot, release.version);
-        const lock = JSON.parse(await fs.promises.readFile(path.join(runtimeRoot, 'package-lock.json'), 'utf8'));
-        const installed = lock.packages?.['node_modules/@deepseek-ai/dsh'];
-        if (installed?.version !== release.version || installed?.integrity !== metadata.dist.integrity) {
-          throw new Error('Harness 下载完整性校验失败，当前引擎保持不变。');
+        markUnsafe(false);
+        let next;
+        if (!newer) {
+          publish({ state: 'installing', busy: true, canCancel: true, message: '正在整理当前 Harness 引擎并清理历史副本…' });
+          const original = getRuntime();
+          await fs.promises.cp(original.runtimeRoot, runtimeRoot, { recursive: true, force: false,
+            filter: source => { throwIfAborted(signal); return path.dirname(source) !== original.runtimeRoot || !['npm-cache', '.npmrc', 'global.npmrc', '.attempt.json'].includes(path.basename(source)); } });
+          throwIfAborted(signal);
+          next = { ...active, directory };
+        } else {
+          await fs.promises.writeFile(path.join(runtimeRoot, 'package.json'), JSON.stringify({
+            name: 'deepseek-harness-runtime', version: '0.0.0', private: true,
+            dependencies: { [PACKAGE]: release.version }, allowScripts: ALLOWED_SCRIPTS,
+          }, null, 2));
+          await fs.promises.writeFile(path.join(runtimeRoot, '.npmrc'), `registry=${REGISTRY}\n`);
+          await fs.promises.writeFile(path.join(runtimeRoot, 'global.npmrc'), '');
+          const options = { cwd: runtimeRoot, env: npmEnvironment(nodePath, runtimeRoot, runtimeRoot), signal };
+          const shared = [`--registry=${REGISTRY}`, '--no-audit', '--no-fund', '--no-progress', '--engine-strict'];
+          publish({ state: 'downloading', busy: true, canCancel: true, message: '正在下载官方 Harness 与依赖，首次可能需要几分钟…' });
+          await subprocess(() => execute(nodePath, [npmCli, 'install', '--ignore-scripts', ...shared], options));
+          throwIfAborted(signal);
+          readRuntimeVersion(runtimeRoot, release.version);
+          const lock = JSON.parse(await fs.promises.readFile(path.join(runtimeRoot, 'package-lock.json'), 'utf8'));
+          const installed = lock.packages?.['node_modules/@deepseek-ai/dsh'];
+          if (installed?.version !== release.version || installed?.integrity !== metadata.dist.integrity) {
+            throw new Error('Harness 下载完整性校验失败，当前引擎保持不变。');
+          }
+          publish({ state: 'installing', busy: true, canCancel: true, message: '正在准备 Harness 本地终端与运行组件…' });
+          await subprocess(() => execute(nodePath, [npmCli, 'rebuild', ...Object.keys(ALLOWED_SCRIPTS).filter(name => ALLOWED_SCRIPTS[name]),
+            '--ignore-scripts=false', '--foreground-scripts', ...shared], options));
+          throwIfAborted(signal);
+          next = { directory, version: release.version, tag: release.tag, releaseUrl: release.releaseUrl,
+            prerelease: release.prerelease, publishedAt: release.publishedAt, integrity: metadata.dist.integrity };
         }
-        publish({ state: 'installing', busy: true, message: '正在准备 Harness 本地终端与运行组件…' });
-        await execute(nodePath, [npmCli, 'rebuild', ...Object.keys(ALLOWED_SCRIPTS).filter(name => ALLOWED_SCRIPTS[name]),
-          '--ignore-scripts=false', '--foreground-scripts', ...shared], options);
+        readRuntimeVersion(runtimeRoot, next.version);
+        publish({ state: 'validating', busy: true, canCancel: true, message: '正在验证 Harness 启动与本地运行组件…' });
+        await subprocess(() => validateCandidate({ runtimeRoot, nodePath, expectedVersion: next.version, signal }));
         throwIfAborted(signal);
-        publish({ state: 'validating', busy: true, message: '正在验证 Harness 启动与本地运行组件…' });
-        await validateCandidate({ runtimeRoot, nodePath, expectedVersion: release.version, signal });
-        throwIfAborted(signal);
+        // A candidate's npm cache/config are part of its transaction. Refuse to
+        // activate until these have been removed; no shared download cache stays.
+        for (const name of ['npm-cache', '.npmrc', 'global.npmrc']) await removeChild(runtimeRoot, name);
         assertStopped();
-        const next = { directory, version: release.version, tag: release.tag, releaseUrl: release.releaseUrl,
-          prerelease: release.prerelease, publishedAt: release.publishedAt, integrity: metadata.dist.integrity };
-        await writeState(next, active, true);
-        previous = active;
+        throwIfAborted(signal);
+        record.committing = true;
+        publish({ state: 'cleaning', busy: true, canCancel: false, message: '正在启用新引擎并清理旧引擎…' });
+        await writeState(next);
         active = next;
-        canRollback = true;
+        activeRoot = updateRoot;
         committed = true;
-        publish({ state: 'ready', busy: false, message: 'Harness 更新完成，下次打开工作区即使用新引擎。' });
+        await cleanup({ removeObsolete: true });
+        publish({ state: 'ready', busy: false, canCancel: false,
+          message: (newer ? 'Harness 更新完成，下次打开工作区即使用新引擎。' : 'Harness 已整理完成，正在使用当前引擎。')
+            + (cleanupPending ? cleanupNote() : ' 旧引擎和下载残留已清理。') });
         return getStatus();
       } catch (error) {
-        // Only this newly-created direct child belongs to the failed operation.
-        // Do not remove it when an owned installer may still be writing to it.
-        if (created && !committed && !error.processMayBeRunning && path.dirname(runtimeRoot) === updateRoot && DIRECTORY.test(directory)) {
-          await fs.promises.rm(runtimeRoot, { recursive: true, force: true }).catch(() => {});
+        if (committed) {
+          // Activation is irreversible. A cleanup error must never be reported
+          // as an update failure or point the app back at a partly deleted engine.
+          cleanupPending = true;
+          publish({ state: 'ready', busy: false, canCancel: false, message: 'Harness 更新完成。' + cleanupNote() });
+          return getStatus();
+        }
+        if (created) {
+          if (unsafe) cleanupPending = true;
+          else {
+            try { await removeChild(updateRoot, directory); }
+            catch { cleanupPending = true; }
+          }
         }
         throw error;
       }
     });
   }
-  function rollback() {
-    return begin(async signal => {
-      assertStopped();
-      if (!canRollback) throw new Error('目前没有可恢复的 Harness 引擎。');
-      throwIfAborted(signal);
-      resolveDescriptor(previous);
-      publish({ state: 'installing', busy: true, message: '正在恢复上次的 Harness 引擎…' });
-      await writeState(previous, active, true);
-      [active, previous] = [previous, active];
-      publish({ state: 'ready', busy: false, message: '已恢复上次的 Harness 引擎，下次打开工作区时生效。' });
-      return getStatus();
-    });
-  }
   async function cancel() {
     if (!operation) return getStatus();
     const pending = operation;
-    pending.controller.abort();
+    if (!pending.committing) pending.controller.abort();
     await pending.promise.catch(() => {});
     return getStatus();
   }
   async function shutdown() { shuttingDown = true; await cancel(); }
-  return { initialize, getRuntime, getStatus, check, update, rollback, cancel, shutdown };
+  return { initialize, getRuntime, getStatus, check, update, cancel, shutdown };
 }
 
 module.exports = { createHarnessUpdater, selectLatestRelease, npmEnvironment, runProcess };

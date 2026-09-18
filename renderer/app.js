@@ -14,7 +14,7 @@ document.querySelectorAll('[data-icon]').forEach(el=>el.innerHTML=icon(el.datase
 const desktop=window.desktop;
 let settings={model:'deepseek-flash',thinking:false,baseUrl:'https://api.deepseek.com',theme:'system',hasApiKey:false,workspace:null};
 let sessions=[],currentId=null,mode='chat',attachment=null,engineState='stopped',pendingDelete=null,toastTimer,saveTimer,modelSaving=false;
-let harnessUpdateStatus={state:'idle',busy:false,message:'',canRollback:false,prerelease:false};
+let harnessUpdateStatus={state:'idle',busy:false,message:'',canCancel:true,prerelease:false};
 let harnessUpdatePending=false,harnessUpdateCancelling=false,harnessUpdateEpoch=0;
 const requests=new Map();
 const escapeHTML=(s)=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -95,7 +95,7 @@ function renderHarnessUpdate(){
   const status=harnessUpdateStatus;
   const busy=harnessUpdateBusy();
   const blocked=engineBlocksUpdate();
-  const labels={idle:'可检查官方发布，或直接更新。',checking:'正在检查官方最新发布…',available:'发现可用的官方更新。',current:'当前引擎已是官方最新发布。',downloading:'正在下载官方 Harness…',installing:'正在准备新的引擎…',validating:'正在验证引擎能否正常运行…',ready:'引擎已更新，可以打开编程工作区。',error:'更新未完成，请重试。',cancelled:'已取消更新，原有引擎仍可使用。'};
+  const labels={idle:'可检查官方发布，或直接更新。',checking:'正在检查官方最新发布…',available:'发现可用的官方更新。',current:'当前引擎已是官方最新发布。',downloading:'正在下载官方 Harness…',installing:'正在准备新的引擎…',validating:'正在验证引擎能否正常运行…',cleaning:'更新已完成，正在清理旧引擎…',ready:'引擎已更新，可以打开编程工作区。',error:'更新未完成，请重试。',cancelled:'已取消更新，原有引擎仍可使用。'};
   // Keep technical release identifiers out of this versionless interface.
   const message=String(status.message||labels[status.state]||labels.idle).replace(/\bv?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\b/g,'对应发布');
   $('harness-update-message').textContent=message;
@@ -106,14 +106,11 @@ function renderHarnessUpdate(){
   $('check-harness-update').disabled=!desktop||busy;
   $('update-harness').disabled=!desktop||busy||blocked;
   $('update-harness').title=blocked?'请结束任务并停止引擎后再更新':'';
-  $('cancel-harness-update').classList.toggle('hidden',!busy);
+  $('cancel-harness-update').classList.toggle('hidden',!busy||status.canCancel===false);
   $('cancel-harness-update').disabled=!desktop||harnessUpdateCancelling;
   $('cancel-harness-update').textContent=harnessUpdateCancelling?'正在取消…':'取消更新';
-  $('rollback-harness').classList.toggle('hidden',!status.canRollback);
-  $('rollback-harness').disabled=!desktop||busy||blocked;
-  $('rollback-harness').title=blocked?'请结束任务并停止引擎后再恢复':'';
   $('harness-update-running-note').classList.toggle('hidden',!blocked);
-  $('harness-update-running-note').textContent=engineState==='stopping'?'正在停止引擎，请稍候再更新或恢复。':engineState==='starting'?'请等待引擎启动完成，结束任务并停止引擎后再更新或恢复。':'请先结束正在运行的任务，再点击“停止引擎”，然后更新或恢复。';
+  $('harness-update-running-note').textContent=engineState==='stopping'?'正在停止引擎，请稍候再更新。':engineState==='starting'?'请等待引擎启动完成，结束任务并停止引擎后再更新。':'请先结束正在运行的任务，再点击“停止引擎”，然后更新。';
   $('settings-stop-engine').classList.toggle('hidden',engineState!=='running');
   $('start-engine').disabled=busy||['starting','stopping'].includes(engineState);
 }
@@ -140,10 +137,11 @@ async function runHarnessUpdate(action){
   harnessUpdatePending=true;
   renderHarnessUpdate();
   try{
-    const method=action==='check'?'checkHarnessUpdate':action==='rollback'?'rollbackHarness':'updateHarness';
+    const method=action==='check'?'checkHarnessUpdate':'updateHarness';
     receiveHarnessUpdateStatus(await desktop[method]());
   }catch(error){
-    receiveHarnessUpdateStatus({state:'error',busy:false,message:cleanError(error)});
+    try{receiveHarnessUpdateStatus(await desktop.getHarnessUpdateStatus());}
+    catch{receiveHarnessUpdateStatus({state:'error',busy:false,message:cleanError(error)});}
   }finally{
     harnessUpdatePending=false;
     renderHarnessUpdate();
@@ -168,7 +166,7 @@ $('search-input').addEventListener('input',renderSearch);
 function renderAttachment(){$('attachment-chip').classList.toggle('hidden',!attachment);$('attachment-chip').innerHTML=attachment?`<span>📎 ${escapeHTML(attachment.name)} · ${(attachment.size/1024).toFixed(1)} KB</span><button data-action="remove-attachment" aria-label="移除附件">×</button>`:'';}
 $('file-input').addEventListener('change',async e=>{const file=e.target.files[0];if(!file)return;if(file.size>128*1024){toast('请添加 128 KB 以内的文本或代码文件。');e.target.value='';return;}const text=await file.text();if(text.includes('\u0000')){toast('暂时仅支持文本和代码文件。');return;}attachment={name:file.name,text,size:file.size};renderAttachment();e.target.value='';});
 async function exportHistory(){if(mode!=='chat')return;const content=sessions.map(s=>`# ${s.title}\n\n${s.messages.map(m=>`## ${m.role==='user'?'你':'DeepSeek'}\n\n${m.content}${m.reasoning?'\n\n<details><summary>思考过程</summary>\n\n'+m.reasoning+'\n\n</details>':''}`).join('\n\n')}`).join('\n\n---\n\n');if(desktop){const result=await desktop.exportHistory({content:content||'# DeepSeek\n\n暂无对话。',filename:'DeepSeek-对话-'+new Date().toISOString().slice(0,10)+'.md'});if(result.saved)toast('对话已导出。');return;}const blob=new Blob([content||'# DeepSeek\n\n暂无对话。'],{type:'text/markdown;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`DeepSeek-对话-${new Date().toISOString().slice(0,10)}.md`;a.click();setTimeout(()=>URL.revokeObjectURL(url),3000);}
-const actions={chat:()=>setMode('chat'),codex:()=>setMode('codex'),new:newChat,sidebar:()=>{if(mode!=='chat')return;$('app').classList.toggle('sidebar-collapsed');updateBounds();},settings:openSettings,search:()=>{if(mode!=='chat')return;$('search-input').value='';renderSearch();showDialog('search-dialog');},workspace,connect,disconnect:()=>desktop?.disconnectHarness(),'check-harness-update':()=>runHarnessUpdate('check'),'update-harness':()=>runHarnessUpdate('update'),'cancel-harness-update':cancelHarnessUpdate,'rollback-harness':()=>runHarnessUpdate('rollback'),send:sendMessage,attach:()=>$('file-input').click(),'remove-attachment':()=>{attachment=null;renderAttachment();},think:async()=>{settings.thinking=!settings.thinking;updateSettingsUI();if(desktop)await desktop.saveSettings({thinking:settings.thinking});},theme:async()=>{settings.theme=document.body.dataset.theme==='dark'?'light':'dark';applyTheme();if(desktop)await desktop.saveSettings({theme:settings.theme});},export:exportHistory,'delete-key':async()=>{if(desktop){const saved=await desktop.saveSettings({apiKey:''});settings.hasApiKey=saved.hasApiKey;openSettingsFieldsOnly();toast('API Key 已移除。');}else toast('预览中没有保存密钥。');}};
+const actions={chat:()=>setMode('chat'),codex:()=>setMode('codex'),new:newChat,sidebar:()=>{if(mode!=='chat')return;$('app').classList.toggle('sidebar-collapsed');updateBounds();},settings:openSettings,search:()=>{if(mode!=='chat')return;$('search-input').value='';renderSearch();showDialog('search-dialog');},workspace,connect,disconnect:()=>desktop?.disconnectHarness(),'check-harness-update':()=>runHarnessUpdate('check'),'update-harness':()=>runHarnessUpdate('update'),'cancel-harness-update':cancelHarnessUpdate,send:sendMessage,attach:()=>$('file-input').click(),'remove-attachment':()=>{attachment=null;renderAttachment();},think:async()=>{settings.thinking=!settings.thinking;updateSettingsUI();if(desktop)await desktop.saveSettings({thinking:settings.thinking});},theme:async()=>{settings.theme=document.body.dataset.theme==='dark'?'light':'dark';applyTheme();if(desktop)await desktop.saveSettings({theme:settings.theme});},export:exportHistory,'delete-key':async()=>{if(desktop){const saved=await desktop.saveSettings({apiKey:''});settings.hasApiKey=saved.hasApiKey;openSettingsFieldsOnly();toast('API Key 已移除。');}else toast('预览中没有保存密钥。');}};
 function openSettingsFieldsOnly(){$('api-key').value='';$('api-key').placeholder='sk-…';$('key-state').textContent='尚未配置 API Key。';}
 const chatActions=new Set(['new','search','send','attach','remove-attachment','think','export']);
 document.addEventListener('click',async e=>{const el=e.target.closest('button,a');if(!el)return;try{if(el.dataset.close){$(el.dataset.close).close();return;}if(el.dataset.action){if(mode!=='chat'&&chatActions.has(el.dataset.action))return;await actions[el.dataset.action]?.();return;}if(el.dataset.window){if(desktop)await desktop.windowControl(el.dataset.window);return;}if(el.dataset.prompt){$('prompt').value=el.dataset.prompt;$('prompt').focus();return;}if(el.dataset.session){if(mode!=='chat')return;if($('search-dialog').open)$('search-dialog').close();selectSession(el.dataset.session);return;}if(el.dataset.delete){if(mode!=='chat')return;pendingDelete=el.dataset.delete;showDialog('confirm-dialog');return;}if(el.dataset.copy){await navigator.clipboard.writeText(current().messages[Number(el.dataset.copy)].content);toast('回复已复制。');return;}if(el.tagName==='A'){if(el.hasAttribute('download'))return;e.preventDefault();if(desktop)await desktop.openExternal(el.href);else toast('项目地址：https://github.com/deepseek-ai/deepseek-harness');}}catch(error){toast(cleanError(error));}});
