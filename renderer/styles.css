@@ -14,3 +14,15 @@
 .harness-update-actions{display:flex;align-items:center;flex-wrap:wrap;gap:9px;margin-top:13px}
 .harness-update-actions .primary-button,.harness-update-actions .secondary-button{padding:8px 12px;font-size:10px}
 .harness-update-actions .text-button{padding:5px 0}
+
+/* The shell sidebar belongs to Chat. Harness owns its own navigation. */
+.app[data-mode=codex] #sidebar,.app[data-mode=codex] .show-sidebar{display:none}
+.app[data-mode=codex] .titlebar{padding-left:18px}
+.header-mode-switch{margin:0;padding:3px;width:188px;flex-shrink:0;border-radius:10px;-webkit-app-region:no-drag}
+.header-mode-switch button{height:31px;font-size:12px;gap:6px}
+.header-mode-switch svg{width:15px;height:15px}
+.header-brand{font-size:14px;font-weight:600;color:var(--muted);white-space:nowrap}
+.title-left{min-width:0;gap:12px}
+.title-actions{flex-shrink:0}
+body[data-mode=codex] [data-chat-only]{display:none}
+@media(max-width:760px){.header-brand{display:none}.header-mode-switch{width:176px}.title-left{gap:7px}}

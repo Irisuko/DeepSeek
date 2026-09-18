@@ -28,6 +28,12 @@ await manager.stop();
 - 同一个项目重复连接会复用进程；更换项目先停止旧进程。
 - Harness 首次进入仍需要在自己的界面选择工作区及配置模型。
 
+## Chat 与 Harness 的会话隔离
+
+Chat 只读写用户数据目录下的 `history.json`，Harness 使用独立的 `harness-home`，其浏览器视图还使用单独的 `persist:deepseek-harness` 分区。现有数据无需迁移。
+
+顶部的模式切换始终可用。Chat 模式显示桌面会话侧栏；Harness 模式隐藏整个桌面侧栏，让官方工作区占满标题栏下方的区域。新建、搜索、选择和删除 Chat 会话及相应快捷键只在 Chat 模式工作。模式切换只隐藏或显示视图，不重建 Harness 的 WebContents，也不清空 Chat 当前会话或草稿；键盘焦点随可见工作区切换。
+
 ## 引擎更新来源
 
 以下是构建与兼容性所需的技术信息；应用界面和安装包名称不展示版本号。

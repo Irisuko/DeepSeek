@@ -1,6 +1,6 @@
 # DeepSeek
 
-一个个人开发的 Windows x64 桌面应用：左上角切换 **Chat** 和 **Harness**，配有会话侧栏、深浅色主题和本地项目入口。
+一个个人开发的 Windows x64 桌面应用：顶部切换 **Chat** 和 **Harness**。Chat 显示自己的会话侧栏；Harness 仅保留官方工作区自带的侧栏，并支持深浅色主题和本地项目。
 
 本项目没有 DeepSeek 或 OpenAI 的官方背书。**Harness 编程模式运行 DeepSeek Harness**。
 
@@ -23,15 +23,17 @@ Chat 支持添加不超过 128 KB 的文本或代码附件；附件内容随消�
 
 ### Harness
 
-1. 左上角切换到 Harness，选择本地项目文件夹。
+1. 通过顶部模式切换进入 Harness，选择本地项目文件夹。
 2. 点击「打开编程工作区」。首次加载官方插件可能需要几分钟。
 3. 在出现的 **Harness 自己的设置**中配置模型和 API Key，并选择工作区，然后开始任务。
 
 **Chat 与 Harness 的模型配置和 API Key 分开保存，需要分别配置。** Harness 页面嵌入官方 Harness Web UI；项目文件访问、命令执行、会话和审批由 Harness 处理。关闭应用或停止引擎会终止正在运行的 Harness 任务。
 
+**会话分开管理：** Chat 的会话、新建和搜索入口只在 Chat 模式使用；Harness 会话由其工作区侧栏管理。切换模式会保留各自当前页面和 Chat 输入草稿，不会停止正在运行的 Harness。Harness 模式下可通过顶部切回 Chat，也可打开桌面设置和检查引擎更新。
+
 ### 更新 Harness
 
-1. 打开桌面应用左下角「设置」，找到「Harness 编程引擎 → 引擎更新」。
+1. 打开桌面应用顶部「设置」，找到「Harness 编程引擎 → 引擎更新」。
 2. 可以先点击「检查更新」，也可以直接点击「更新 Harness」。如果引擎正在运行，先等待任务结束，再点击「停止引擎」。
 3. 应用会查询 [官方 Harness 发布](https://github.com/deepseek-ai/deepseek-harness/releases)，下载最新发布对应的官方 npm 包及依赖，并自动验证原生组件、启动、认证和页面响应。首次更新可能需要几分钟。
 4. 更新完成后，重新打开编程工作区即可使用新引擎，无需重新安装整个 DeepSeek。

@@ -253,13 +253,20 @@ function wireIPC() {
     if (!['chat', 'codex'].includes(nextMode)) throw new Error('模式无效。');
     mode = nextMode;
     updateHarnessBounds();
+    // Keep keyboard input with the visible workspace when native views switch.
+    if (mode === 'chat') mainWindow.webContents.focus();
+    else if (harnessView?.getVisible()) harnessView.webContents.focus();
     return { mode };
   });
   handle('desktop:set-harness-visible', (_event, visible) => {
     if (typeof visible !== 'boolean') throw new Error('显示参数无效。');
+    const wasVisible = Boolean(harnessView?.getVisible());
     harnessVisible = visible;
     updateHarnessBounds();
-    return { visible: mode === 'codex' && harnessVisible && Boolean(harnessView) };
+    const nowVisible = Boolean(harnessView?.getVisible());
+    if (nowVisible && !wasVisible) harnessView.webContents.focus();
+    else if (wasVisible && !nowVisible) mainWindow.webContents.focus();
+    return { visible: nowVisible };
   });
   handle('desktop:set-harness-bounds', (_event, bounds) => {
     if (!bounds || ['x', 'y', 'width', 'height'].some((key) => typeof bounds[key] !== 'number' || !Number.isFinite(bounds[key]) || Math.abs(bounds[key]) > 100000)) throw new Error('页面尺寸无效。');
