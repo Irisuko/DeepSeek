@@ -10,3 +10,9 @@
 - https://opencode.ai/docs/zen/#endpoints
 - https://developers.openai.com/api/docs/guides/streaming-responses
 - https://platform.claude.com/docs/en/build-with-claude/streaming
+
+## 平台初始模型列表更新
+
+- Chat 与存储相关的 23 项回归测试通过。
+- Electron 界面逐一切换 OpenCode Go、Zen、OpenAI、Anthropic，验证模型 ID、显示名称、顺序与默认选择。
+- 验证旧预置模型迁移、Go 完整接口路径识别、自定义模型保留。

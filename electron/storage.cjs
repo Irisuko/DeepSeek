@@ -3,6 +3,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const ChatConfig = require('../renderer/chat-config.js');
 const { validateBaseUrl, validateHarnessUrl, validateModel, validateThinking, validateProtocol, validateModelProfiles } = require('./chat-client.cjs');
 
 const DEFAULT_SETTINGS = Object.freeze({ model: 'deepseek-flash', thinking: false, apiProtocol: 'auto', modelProfiles: [], baseUrl: 'https://api.deepseek.com', theme: 'system', harnessUrl: 'http://127.0.0.1:3080', workspace: null });
@@ -49,6 +50,7 @@ class Storage {
     }
     // OpenCode uses a different Flash ID from DeepSeek's own API.
     if (this.settings.model === 'deepseek-flash' && new URL(this.settings.baseUrl).hostname === 'opencode.ai') this.settings.model = 'deepseek-v4-flash';
+    this.settings.model = ChatConfig.selectedModel(this.settings);
     if (typeof stored.encryptedApiKey === 'string' && stored.encryptedApiKey.length <= 32768) this.settings.encryptedApiKey = stored.encryptedApiKey;
   }
 
@@ -96,6 +98,7 @@ class Storage {
     return this.serialized(async () => {
       const validated = this.validateSettings(input);
       const next = { ...this.settings, ...validated };
+      if (input.model === undefined) next.model = ChatConfig.selectedModel(next, this.settings.baseUrl);
       if (new URL(next.baseUrl).origin !== new URL(this.settings.baseUrl).origin && !input.apiKey?.trim()) {
         delete next.encryptedApiKey;
       }

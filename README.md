@@ -26,11 +26,22 @@ API 基础地址为 `https://opencode.ai/zen/v1`，接口选择「自动」，�
 | 模型 ID | 自动接口 |
 | --- | --- |
 | `deepseek-v4-flash` | Chat Completions |
-| `deepseek-v4-pro` | Chat Completions |
-| `gpt-5.4` | Responses |
-| `claude-sonnet-4-6` | Messages |
+| `gpt-6-astra` | Responses |
+| `gpt-5.6-sol` | Responses |
+| `claude-fable-5-1` | Messages |
 
 模型 ID 以[平台文档](https://opencode.ai/docs/zen/#endpoints)为准；OpenCode Go 使用 `https://opencode.ai/zen/go/v1`，需确认订阅支持目标模型。DeepSeek 官方 Flash 的 ID 是 `deepseek-flash`，不同于 OpenCode。
+
+#### 初始模型列表
+
+| 平台 | 初始模型（按顺序） |
+| --- | --- |
+| OpenCode Go | DeepSeek V4.1 Flash |
+| OpenCode Zen | GPT 6 Astra、GPT 5.6 Sol、Claude Fable 5.1、DeepSeek V4 Flash |
+| OpenAI | GPT 6 Astra、GPT 5.6 Sol |
+| Anthropic | Claude Fable 5.1 |
+
+OpenCode Go 的模型 ID 为 `deepseek-v4.1-flash`。切换平台时，若当前模型不在该平台初始列表中，默认选择列表第一项。手动添加的自定义模型仍可选择。旧版预置模型会在加载设置时迁移到新列表，自定义模型配置保留。
 
 #### 思考与兼容性
 
