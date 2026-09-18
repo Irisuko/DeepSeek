@@ -28,3 +28,5 @@ body[data-mode=codex] [data-chat-only]{display:none}
 @media(max-width:760px){.header-brand{display:none}.header-mode-switch{width:176px}.title-left{gap:7px}}
 
 .model-dialog{width:480px}.model-dialog .settings-fields{overflow:auto}.model-dialog #model-error{color:#be6b63;font-size:12px}.composer-model{max-width:210px}.composer-model select{max-width:210px}
+
+.connection-card{padding:15px;margin:12px 0;border:1px solid var(--line);border-radius:10px}.connection-heading{display:flex;align-items:center;justify-content:space-between;font-size:12px}.provider-adds{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}.provider-adds button{font-size:10px;padding:8px 10px}.model-route{font-size:9px;color:var(--muted);max-width:90px}.composer-right{flex-wrap:wrap}

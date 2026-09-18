@@ -203,13 +203,10 @@ function wireIPC() {
     if (!request || typeof request.requestId !== 'string' || !/^[\w-]{1,128}$/.test(request.requestId)) throw new Error('请求标识无效。');
     if (activeRequests.has(request.requestId)) throw new Error('此请求已经在运行。');
     if (activeRequests.size >= 4) throw new Error('已有多个回复正在生成，请稍后再试。');
-    const apiKey = storage.getApiKey();
-    const model = validateModel(request.model || storage.settings.model);
+    const requestedModel = validateModel(request.model || storage.settings.model);
+    const {apiKey,model,baseUrl,apiProtocol,modelProfiles} = storage.getChatConnection(requestedModel);
     const thinking = validateThinking(request.thinking === undefined ? storage.settings.thinking : request.thinking);
     const messages = validateMessages(request.messages);
-    const baseUrl = storage.settings.baseUrl;
-    const apiProtocol = storage.settings.apiProtocol;
-    const modelProfiles = storage.settings.modelProfiles;
     const controller = new AbortController();
     const entry = { owner: event.sender.id, controller, cancelled: false };
     activeRequests.set(request.requestId, entry);

@@ -40,7 +40,8 @@ function validateModelProfiles(value) {
     const protocol = validateProtocol(p.protocol);
     const expected = {deepseek:'chat',responses:'responses',adaptive:'messages',budget:'messages'}[p.thinkingMode];
     if (expected && protocol !== expected) throw new Error('请选择与思考类型匹配的接口。');
-    return {model,protocol,thinkingMode:p.thinkingMode};
+    if (p.provider !== undefined && !Object.hasOwn(ChatConfig.platforms,p.provider)) throw new Error('模型平台无效。');
+    return {model,protocol,thinkingMode:p.thinkingMode,...(p.provider?{provider:p.provider}:{})};
   });
 }
 

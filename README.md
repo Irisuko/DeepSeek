@@ -14,43 +14,45 @@
 
 ### Chat
 
-1. 打开「设置」，选择 DeepSeek 官方、OpenCode Zen / Go、OpenAI、Anthropic 或自定义平台，填写该平台的 API Key。
-2. 设置 API 基础地址和接口类型。支持 Chat Completions、Responses、Messages；完整接口地址也可填写，不会重复拼接路径。OpenCode 自动按 DeepSeek / GPT / Claude 模型选择接口。
-3. 在**对话输入栏**选择模型。「＋ 添加模型…」支持自定义模型 ID；旁边的配置按钮可设置该模型的接口与思考参数。候选项仅是便捷入口，实际可用性和费用由平台账户决定。
+1. 打开「设置」，添加 DeepSeek 官方、OpenCode Go 或 OpenCode Zen，分别填写该平台的 API Key。可同时添加三个平台，各自保存独立密钥。
+2. 点击「保存设置」。模型列表根据已添加的平台生成；OpenAI 和 Anthropic 不再作为单独的平台入口。
+3. 在**对话输入栏**选择模型，旁边显示本次使用的平台。
 4. 输入消息即可发送。可停止生成、查看平台返回的思考内容、搜索历史、复制回复及导出 Markdown。
 
-#### OpenCode Zen 示例
+#### 模型列表与路由
 
-API 基础地址为 `https://opencode.ai/zen/v1`，接口选择「自动」，密钥使用 OpenCode 的 API Key。
-
-| 模型 ID | 自动接口 |
+| 已添加的平台 | 列表中加入的模型 |
 | --- | --- |
-| `deepseek-v4-flash` | Chat Completions |
-| `gpt-6-astra` | Responses |
-| `gpt-5.6-sol` | Responses |
-| `claude-fable-5-1` | Messages |
+| OpenCode Zen | GPT 6 Astra、GPT 5.6 Sol、Claude Fable 5.1 |
+| DeepSeek 官方或 OpenCode Go | DeepSeek V4.1 Flash、DeepSeek V4 Pro |
 
-模型 ID 以[平台文档](https://opencode.ai/docs/zen/#endpoints)为准；OpenCode Go 使用 `https://opencode.ai/zen/go/v1`，需确认订阅支持目标模型。DeepSeek 官方 Flash 的 ID 是 `deepseek-flash`，不同于 OpenCode。
+添加多个平台后，模型合并显示且不重复。只有 Zen 时显示三款 GPT / Claude 模型；同时添加官方或 Go 后显示全部五款。移除平台会隐藏失去对应连接的模型，并自动选择剩余可用项。未添加任何平台时，需先添加平台才能发送消息。
 
-#### 初始模型列表
+DeepSeek 模型按已添加的平台优先选择：**DeepSeek 官方 → OpenCode Go → OpenCode Zen**；GPT 和 Claude 使用 **OpenCode Zen**。优先级在发送前确定，请求失败会显示错误，不会自动向其他平台重复发送。按上述列表规则，仅添加 Zen 时不展示 DeepSeek 模型。
 
-| 平台 | 初始模型（按顺序） |
+| 平台 | 默认 API 地址 |
 | --- | --- |
-| OpenCode Go | DeepSeek V4.1 Flash |
-| OpenCode Zen | GPT 6 Astra、GPT 5.6 Sol、Claude Fable 5.1、DeepSeek V4 Flash |
-| OpenAI | GPT 6 Astra、GPT 5.6 Sol |
-| Anthropic | Claude Fable 5.1 |
+| DeepSeek 官方 | https://api.deepseek.com |
+| OpenCode Go | https://opencode.ai/zen/go/v1 |
+| OpenCode Zen | https://opencode.ai/zen/v1 |
 
-OpenCode Go 的模型 ID 为 `deepseek-v4.1-flash`。切换平台时，若当前模型不在该平台初始列表中，默认选择列表第一项。手动添加的自定义模型仍可选择。旧版预置模型会在加载设置时迁移到新列表，自定义模型配置保留。
+Flash 在 DeepSeek 官方请求中使用 **deepseek-flash**，在 Go 中使用 **deepseek-v4.1-flash**；Pro 使用 **deepseek-v4-pro**。Zen 的 GPT 模型使用 Responses，Claude 使用 Messages，DeepSeek 使用 Chat Completions。模型的实际权限和费用由平台账户决定。
+
+「＋ 添加模型…」仍支持自定义模型 ID，必须绑定已添加的平台；移除该平台后，这些模型也会隐藏。模型配置可单独指定接口和思考参数，预置模型的平台按上述路由规则自动确定。旧版未绑定平台的自定义模型不会自动混入新列表，需要重新添加并绑定平台。
+
+#### 密钥与旧设置
+
+- 各平台密钥使用系统安全存储分别加密，界面不会回显。留空保持已有密钥，移除平台会移除其当前连接密钥。
+- 更改 API 地址的源（协议、域名或端口）时需重新填写密钥。同源接口路径调整可继续使用原密钥。
+- 旧版 DeepSeek / OpenCode 单平台连接会迁移为一个已添加的平台；原设置备份为 **settings.before-platforms.json**。备份可能保留历史加密密钥，且不会用于请求。OpenAI / Anthropic 密钥不会转用到 Zen，需要添加 Zen 自己的密钥。
 
 #### 思考与兼容性
 
-- DeepSeek 官方继续使用原有深度思考开关。其他平台默认不发送专属参数，由服务决定思考行为。
-- 支持思考的自定义模型可配置 DeepSeek thinking、Responses reasoning（medium）、Claude adaptive 或 budget（2048），然后在输入栏开关。Responses / Claude 关闭开关时恢复平台默认，不强制关闭模型自身推理。需要按平台文档选择支持的格式。
-- 当前支持文本多轮对话与流式回复；Claude 回复上限为 8192 tokens。此改动不增加图片理解、工具调用或联网搜索。
-- 当前保存一个活动平台连接。更换地址的源（协议、域名或端口）时需填写该平台密钥；留空会清除旧连接密钥，防止误发给新平台。同一平台切换接口路径可继续使用原密钥。
+- DeepSeek 官方继续使用深度思考开关。其他平台默认不发送专属参数，由服务决定思考行为。
+- 支持思考的模型可配置 DeepSeek thinking、Responses reasoning（medium）、Claude adaptive 或 budget（2048），然后在输入栏开关。Responses / Claude 关闭开关时恢复平台默认，不强制关闭模型自身推理。需要按平台文档选择支持的格式。
+- 当前支持文本多轮对话与流式回复；Claude 回复上限为 8192 tokens。支持添加不超过 128 KB 的文本或代码附件，附件内容随消息发送给对应平台。
 
-Chat 支持添加不超过 128 KB 的文本或代码附件；附件内容随消息发送给配置的 API。对话历史保存在本机，Chat API Key 使用系统安全存储加密后保存。Chat 与 Harness 的连接互相独立。
+对话历史保存在本机。Chat 与 Harness 的连接、密钥和会话分别管理。
 
 ### Harness
 

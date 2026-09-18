@@ -1,13 +1,10 @@
 'use strict';
-
-const fs = require('node:fs/promises');
-const path = require('node:path');
-const crypto = require('node:crypto');
-const ChatConfig = require('../renderer/chat-config.js');
-const { validateBaseUrl, validateHarnessUrl, validateModel, validateThinking, validateProtocol, validateModelProfiles } = require('./chat-client.cjs');
-
-const DEFAULT_SETTINGS = Object.freeze({ model: 'deepseek-flash', thinking: false, apiProtocol: 'auto', modelProfiles: [], baseUrl: 'https://api.deepseek.com', theme: 'system', harnessUrl: 'http://127.0.0.1:3080', workspace: null });
-
+const fs=require('node:fs/promises');
+const path=require('node:path');
+const crypto=require('node:crypto');
+const ChatConfig=require('../renderer/chat-config.js');
+const {validateBaseUrl,validateHarnessUrl,validateModel,validateThinking,validateModelProfiles}=require('./chat-client.cjs');
+const DEFAULT_SETTINGS=Object.freeze({model:'',thinking:false,connections:[],modelProfiles:[],theme:'system',harnessUrl:'http://127.0.0.1:3080',workspace:null});
 async function atomicWrite(file, content) {
   await fs.mkdir(path.dirname(file), { recursive: true });
   const temporary = `${file}.${crypto.randomUUID()}.tmp`;
@@ -31,99 +28,93 @@ async function readJson(file, fallback) {
   }
 }
 
+
 class Storage {
-  constructor(directory, safeStorage) {
-    this.directory = directory;
-    this.safeStorage = safeStorage;
-    this.settings = { ...DEFAULT_SETTINGS };
-    this.queue = Promise.resolve();
-  }
-
-  async initialize() {
-    const parsed = await readJson(path.join(this.directory, 'settings.json'), {});
-    const stored = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-    try { this.settings = { ...DEFAULT_SETTINGS, ...this.validateSettings(stored) }; }
-    catch { this.settings = { ...DEFAULT_SETTINGS }; }
-    if (['deepseek-chat', 'deepseek-reasoner'].includes(this.settings.model) && new URL(this.settings.baseUrl).hostname === 'api.deepseek.com') {
-      if (stored.thinking === undefined) this.settings.thinking = this.settings.model === 'deepseek-reasoner';
-      this.settings.model = 'deepseek-flash';
+  constructor(directory,safeStorage){this.directory=directory;this.safeStorage=safeStorage;this.settings={...DEFAULT_SETTINGS};this.queue=Promise.resolve();}
+  async initialize(){
+    const file=path.join(this.directory,'settings.json');
+    const parsed=await readJson(file,{});
+    const stored=parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?parsed:{};
+    this.settings={...DEFAULT_SETTINGS,...this.validateSettings(stored)};
+    if(Array.isArray(stored.connections)){
+      this.settings.connections=this.validateConnections(stored.connections,true);
+    }else{
+      // Keep the original encrypted settings for migration recovery; never expose them to the renderer.
+      if(stored.encryptedApiKey||stored.modelProfiles?.length){
+        await fs.copyFile(file,path.join(this.directory,'settings.before-platforms.json'),fs.constants.COPYFILE_EXCL).catch(error=>{if(error.code!=='EEXIST')throw error;});
+      }
+      let provider;
+      try{provider=ChatConfig.provider(stored.baseUrl||'https://api.deepseek.com');}catch{}
+      this.settings.connections=Object.hasOwn(ChatConfig.platforms,provider)&&typeof stored.encryptedApiKey==='string'&&stored.encryptedApiKey.length<=32768
+        ?[{provider,baseUrl:ChatConfig.platforms[provider].baseUrl,encryptedApiKey:stored.encryptedApiKey}]:[];
+      // Legacy profiles were global. Retain them for recovery, but require an explicit platform before listing them.
+      if(stored.thinking===undefined&&stored.model==='deepseek-reasoner')this.settings.thinking=true;
     }
-    // OpenCode uses a different Flash ID from DeepSeek's own API.
-    if (this.settings.model === 'deepseek-flash' && new URL(this.settings.baseUrl).hostname === 'opencode.ai') this.settings.model = 'deepseek-v4-flash';
-    this.settings.model = ChatConfig.selectedModel(this.settings);
-    if (typeof stored.encryptedApiKey === 'string' && stored.encryptedApiKey.length <= 32768) this.settings.encryptedApiKey = stored.encryptedApiKey;
+    this.settings.model=ChatConfig.selectedModel(this.settings);
   }
-
-  validateSettings(input) {
-    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('设置格式无效。');
-    const next = {};
-    if (input.apiProtocol !== undefined) next.apiProtocol = validateProtocol(input.apiProtocol);
-    if (input.modelProfiles !== undefined) next.modelProfiles = validateModelProfiles(input.modelProfiles);
-    if (input.model !== undefined) next.model = validateModel(input.model);
-    if (input.thinking !== undefined) next.thinking = validateThinking(input.thinking);
-    if (input.baseUrl !== undefined) next.baseUrl = validateBaseUrl(input.baseUrl);
-    if (input.harnessUrl !== undefined) next.harnessUrl = validateHarnessUrl(input.harnessUrl);
-    if (input.theme !== undefined) {
-      if (!['system', 'light', 'dark'].includes(input.theme)) throw new Error('主题无效。');
-      next.theme = input.theme;
-    }
-    if (input.workspace !== undefined) {
-      if (input.workspace !== null && (typeof input.workspace !== 'string' || input.workspace.length > 32768 || !path.isAbsolute(input.workspace))) throw new Error('项目文件夹路径无效。');
-      next.workspace = input.workspace;
+  validateSettings(input){
+    if(!input||typeof input!=='object'||Array.isArray(input))throw new Error('设置格式无效。');
+    const next={};
+    if(input.model!==undefined)next.model=input.model===''?'':validateModel(input.model);
+    if(input.thinking!==undefined)next.thinking=validateThinking(input.thinking);
+    if(input.modelProfiles!==undefined)next.modelProfiles=validateModelProfiles(input.modelProfiles);
+    if(input.harnessUrl!==undefined)next.harnessUrl=validateHarnessUrl(input.harnessUrl);
+    if(input.theme!==undefined){if(!['system','light','dark'].includes(input.theme))throw new Error('主题无效。');next.theme=input.theme;}
+    if(input.workspace!==undefined){
+      if(input.workspace!==null&&(typeof input.workspace!=='string'||input.workspace.length>32768||!path.isAbsolute(input.workspace)))throw new Error('项目文件夹路径无效。');
+      next.workspace=input.workspace;
     }
     return next;
   }
-
-  publicSettings() {
-    return {
-      apiProtocol: this.settings.apiProtocol,
-      modelProfiles: this.settings.modelProfiles,
-      model: this.settings.model,
-      thinking: this.settings.thinking,
-      baseUrl: this.settings.baseUrl,
-      theme: this.settings.theme,
-      harnessUrl: this.settings.harnessUrl,
-      hasApiKey: Boolean(this.settings.encryptedApiKey),
-      workspace: this.settings.workspace,
-    };
-  }
-
-  serialized(operation) {
-    const pending = this.queue.then(operation);
-    this.queue = pending.catch(() => {});
-    return pending;
-  }
-
-  async saveSettings(input) {
-    return this.serialized(async () => {
-      const validated = this.validateSettings(input);
-      const next = { ...this.settings, ...validated };
-      if (input.model === undefined) next.model = ChatConfig.selectedModel(next, this.settings.baseUrl);
-      if (new URL(next.baseUrl).origin !== new URL(this.settings.baseUrl).origin && !input.apiKey?.trim()) {
-        delete next.encryptedApiKey;
+  validateConnections(input,fromDisk=false){
+    if(!Array.isArray(input)||input.length>3)throw new Error('平台配置无效。');
+    const seen=new Set();
+    return input.map(c=>{
+      if(!c||!Object.hasOwn(ChatConfig.platforms,c.provider)||seen.has(c.provider))throw new Error('平台无效或重复添加。');
+      seen.add(c.provider);
+      const baseUrl=validateBaseUrl(c.baseUrl||ChatConfig.platforms[c.provider].baseUrl);
+      if(fromDisk){
+        if(typeof c.encryptedApiKey!=='string'||!c.encryptedApiKey||c.encryptedApiKey.length>32768)throw new Error('平台密钥配置无效。');
+        return {provider:c.provider,baseUrl,encryptedApiKey:c.encryptedApiKey};
       }
-      if (input.apiKey !== undefined) {
-        if (typeof input.apiKey !== 'string' || input.apiKey.length > 4096 || /[\r\n]/.test(input.apiKey)) throw new Error('API Key 格式无效。');
-        const key = input.apiKey.trim();
-        if (!key) delete next.encryptedApiKey;
-        else {
-          if (!this.safeStorage.isEncryptionAvailable()) throw new Error('系统安全存储不可用，无法保存 API Key。');
-          next.encryptedApiKey = this.safeStorage.encryptString(key).toString('base64');
-        }
+      const old=this.settings.connections.find(p=>p.provider===c.provider&&new URL(p.baseUrl).origin===new URL(baseUrl).origin);
+      if(c.apiKey!==undefined&&(typeof c.apiKey!=='string'||c.apiKey.length>4096||/[\r\n]/.test(c.apiKey)))throw new Error('API Key 格式无效。');
+      const key=c.apiKey?.trim();
+      let encryptedApiKey=old?.encryptedApiKey;
+      if(key){
+        if(!this.safeStorage.isEncryptionAvailable())throw new Error('系统安全存储不可用，无法保存 API Key。');
+        encryptedApiKey=this.safeStorage.encryptString(key).toString('base64');
       }
-      await atomicWrite(path.join(this.directory, 'settings.json'), JSON.stringify(next, null, 2));
-      this.settings = next;
-      return this.publicSettings();
+      if(!encryptedApiKey)throw new Error('请填写 '+ChatConfig.platforms[c.provider].name+' 的 API Key。');
+      return {provider:c.provider,baseUrl,encryptedApiKey};
     });
   }
-
-  getApiKey() {
-    if (!this.settings.encryptedApiKey) throw new Error('请先在设置中添加所选平台的 API Key。');
-    if (!this.safeStorage.isEncryptionAvailable()) throw new Error('系统安全存储不可用，请重新打开应用。');
-    try { return this.safeStorage.decryptString(Buffer.from(this.settings.encryptedApiKey, 'base64')); }
-    catch { throw new Error('无法解密已保存的 API Key，请在设置中重新填写。'); }
+  publicSettings(){
+    const {model,thinking,theme,harnessUrl,workspace,modelProfiles}=this.settings;
+    return {model,thinking,theme,harnessUrl,workspace,modelProfiles,connections:this.settings.connections.map(c=>({provider:c.provider,baseUrl:c.baseUrl,hasApiKey:true})),hasApiKey:this.settings.connections.length>0};
   }
-
+  serialized(operation){const pending=this.queue.then(operation);this.queue=pending.catch(()=>{});return pending;}
+  async saveSettings(input){
+    return this.serialized(async()=>{
+      const next={...this.settings,...this.validateSettings(input)};
+      if(input.connections!==undefined)next.connections=this.validateConnections(input.connections);
+      if(input.model&& !ChatConfig.models(next).includes(input.model))throw new Error('此模型没有可用的已添加平台，请先添加平台。');
+      next.model=ChatConfig.selectedModel(next);
+      await atomicWrite(path.join(this.directory,'settings.json'),JSON.stringify(next,null,2));
+      this.settings=next;return this.publicSettings();
+    });
+  }
+  getChatConnection(model=this.settings.model){
+    if(!ChatConfig.models(this.settings).includes(model))throw new Error('请先添加支持此模型的平台。');
+    const route=ChatConfig.route(this.settings,model);
+    if(!route)throw new Error('请先添加支持此模型的平台。');
+    const connection=this.settings.connections.find(c=>c.provider===route.provider);
+    if(!this.safeStorage.isEncryptionAvailable())throw new Error('系统安全存储不可用，请重新打开应用。');
+    let apiKey;
+    try{apiKey=this.safeStorage.decryptString(Buffer.from(connection.encryptedApiKey,'base64'));}
+    catch{throw new Error('无法解密 '+ChatConfig.platforms[route.provider].name+' 的密钥，请在设置中重新填写。');}
+    return {apiKey,model:route.model,baseUrl:route.baseUrl,apiProtocol:route.protocol,modelProfiles:[{model:route.model,protocol:route.protocol,thinkingMode:route.thinkingMode}]};
+  }
   async getHistory() {
     const history = await readJson(path.join(this.directory, 'history.json'), []);
     return Array.isArray(history) ? history : [];
@@ -142,4 +133,5 @@ class Storage {
   }
 }
 
-module.exports = { Storage, DEFAULT_SETTINGS, atomicWrite };
+
+module.exports={Storage,DEFAULT_SETTINGS,atomicWrite};
