@@ -12,7 +12,8 @@ const paths = {
 function icon(name){return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${paths[name]||paths.chat}"/></svg>`;}
 document.querySelectorAll('[data-icon]').forEach(el=>el.innerHTML=icon(el.dataset.icon));
 const desktop=window.desktop;
-let settings={model:'deepseek-flash',thinking:false,baseUrl:'https://api.deepseek.com',theme:'system',hasApiKey:false,workspace:null};
+const ChatConfig=window.ChatConfig;
+let settings={apiProtocol:'auto',modelProfiles:[],model:'deepseek-flash',thinking:false,baseUrl:'https://api.deepseek.com',theme:'system',hasApiKey:false,workspace:null};
 let sessions=[],currentId=null,mode='chat',attachment=null,engineState='stopped',pendingDelete=null,toastTimer,saveTimer,modelSaving=false;
 let harnessUpdateStatus={state:'idle',busy:false,message:'',canCancel:true,prerelease:false};
 let harnessUpdatePending=false,harnessUpdateCancelling=false,harnessUpdateEpoch=0;
@@ -28,17 +29,19 @@ function applyTheme(){const dark=settings.theme==='dark'||(settings.theme==='sys
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change',applyTheme);
 function updateModelSelector(){
   const select=$('model-select');
-  select.querySelector('[data-custom-model]')?.remove();
-  if(![...select.options].some(option=>option.value===settings.model)){
-    const option=new Option(settings.model,settings.model);
-    option.dataset.customModel='true';
-    select.add(option);
-  }
+  select.replaceChildren();
+  for(const id of ChatConfig.models(settings)) select.add(new Option(id==='deepseek-flash'?'DeepSeek Flash':id==='deepseek-v4-pro'?'DeepSeek V4 Pro':id,id));
+  select.add(new Option('＋ 添加模型…','__add_model__'));
+  const capability=ChatConfig.resolve(settings);
+  $('think-button').disabled=capability.thinkingMode==='none';
+  $('think-button').title=capability.thinkingMode==='none'?'思考由平台默认控制；可在模型配置中指定参数':'调整当前模型的思考参数';
+  $('think-button').setAttribute('aria-pressed',String(capability.thinkingMode!=='none'&&settings.thinking));
   select.value=settings.model;
   select.disabled=modelSaving;
 }
 $('model-select').addEventListener('change',async event=>{
   const model=event.target.value;
+  if(model==='__add_model__'){updateModelSelector();openModelDialog(true);return;}
   const previous=settings.model;
   if(modelSaving||model===previous)return;
   settings.model=model;
@@ -54,7 +57,7 @@ $('model-select').addEventListener('change',async event=>{
     updateModelSelector();
   }
 });
-function updateSettingsUI(){applyTheme();updateModelSelector();$('think-button').setAttribute('aria-pressed',String(settings.thinking));$('code-workspace').innerHTML=settings.workspace?`${escapeHTML(settings.workspace.split(/[\\/]/).filter(Boolean).pop())}<small>${escapeHTML(settings.workspace)}</small>`:'选择一个项目文件夹<small>代码和项目保留在你的电脑上</small>';}
+function updateSettingsUI(){applyTheme();updateModelSelector();$('code-workspace').innerHTML=settings.workspace?`${escapeHTML(settings.workspace.split(/[\\/]/).filter(Boolean).pop())}<small>${escapeHTML(settings.workspace)}</small>`:'选择一个项目文件夹<small>代码和项目保留在你的电脑上</small>';}
 function updateBounds(){if(!desktop)return;const rect=$('harness-host').getBoundingClientRect();desktop.setHarnessBounds({x:rect.x,y:rect.y,width:rect.width,height:rect.height}).catch(()=>{});desktop.setHarnessVisible(mode==='codex'&&engineState==='running'&&![...document.querySelectorAll('dialog')].some(x=>x.open)).catch(()=>{});}
 new ResizeObserver(updateBounds).observe($('main')||document.querySelector('.main'));
 new ResizeObserver(updateBounds).observe($('harness-host'));
@@ -158,9 +161,35 @@ async function cancelHarnessUpdate(){
 async function workspace(){if(!desktop){toast('选择本地项目需要使用桌面应用。');return;}const selected=await desktop.chooseWorkspace();if(selected){settings.workspace=selected;updateSettingsUI();setMode('codex');if(engineState==='running')toast('已选择新项目；停止当前引擎后重新打开即可切换。');}}
 async function connect(){if(harnessUpdateBusy()){toast('请等待引擎更新完成，或先取消更新。');return;}if(!desktop){toast('请启动桌面应用后打开 Harness 工作区。');return;}if(!settings.workspace){await workspace();if(!settings.workspace)return;}await desktop.connectHarness();}
 async function showDialog(id){if(desktop)await desktop.setHarnessVisible(false);$(id).showModal();}
-function openSettings(){$('api-key').value='';$('api-key').placeholder=settings.hasApiKey?'已保存 · 留空保持现有密钥':'sk-…';$('base-url').value=settings.baseUrl;$('theme-select').value=settings.theme;$('settings-error').textContent='';$('key-state').textContent=settings.hasApiKey?'密钥已加密保存，填写新密钥可替换。':'密钥加密保存在当前电脑，不会显示在历史记录中。';renderHarnessUpdate();refreshHarnessUpdateStatus();showDialog('settings-dialog');}
+const providerPresets={deepseek:['https://api.deepseek.com','auto'],opencode:['https://opencode.ai/zen/v1','auto'],'opencode-go':['https://opencode.ai/zen/go/v1','auto'],openai:['https://api.openai.com/v1','responses'],anthropic:['https://api.anthropic.com/v1','messages']};
+function providerFor(base){const normalized=base.replace(/\/(chat\/completions|responses|messages)\/?$/,'').replace(/\/$/,'');return Object.keys(providerPresets).find(key=>providerPresets[key][0]===normalized)||'custom';}
+$('provider-select').addEventListener('change',()=>{const preset=providerPresets[$('provider-select').value];if(preset){$('base-url').value=preset[0];$('api-protocol').value=preset[1];}});
+$('base-url').addEventListener('input',()=>{$('provider-select').value=providerFor($('base-url').value);});
+function openModelDialog(add=false){
+  if(modelSaving)return;
+  const profile=(settings.modelProfiles||[]).find(p=>p.model===settings.model);
+  $('custom-model-id').value=add?'':settings.model;
+  $('model-protocol').value=profile?.protocol||'auto';
+  $('model-thinking').value=profile?.thinkingMode||'auto';
+  $('model-error').textContent='';showDialog('model-dialog');
+}
+$('edit-model').addEventListener('click',()=>openModelDialog());
+$('model-form').addEventListener('submit',async event=>{
+  event.preventDefault();if(modelSaving)return;
+  const model=$('custom-model-id').value.trim();
+  if(!/^[\w./:@+-]{1,128}$/.test(model)){$('model-error').textContent='请填写有效的模型 ID，不要填写显示名称。';return;}
+  const profile={model,protocol:$('model-protocol').value,thinkingMode:$('model-thinking').value};
+  const expected={deepseek:'chat',responses:'responses',adaptive:'messages',budget:'messages'}[profile.thinkingMode];
+  if(expected&&profile.protocol!==expected){$('model-error').textContent='请选择与思考参数匹配的接口类型。';return;}
+  const modelProfiles=[...(settings.modelProfiles||[]).filter(p=>p.model!==model),profile];
+  modelSaving=true;$('save-model').disabled=true;updateModelSelector();
+  try{if(desktop)await desktop.saveSettings({model,modelProfiles});settings={...settings,model,modelProfiles};$('model-dialog').close();toast('模型已保存');}
+  catch(error){$('model-error').textContent=cleanError(error);}
+  finally{modelSaving=false;$('save-model').disabled=false;updateModelSelector();}
+});
+function openSettings(){$('api-key').value='';$('api-key').placeholder=settings.hasApiKey?'已保存 · 留空保持现有密钥':'sk-…';$('base-url').value=settings.baseUrl;$('api-protocol').value=settings.apiProtocol||'auto';$('provider-select').value=providerFor(settings.baseUrl);$('theme-select').value=settings.theme;$('settings-error').textContent='';$('key-state').textContent=settings.hasApiKey?'密钥已加密保存，填写新密钥可替换。':'密钥加密保存在当前电脑，不会显示在历史记录中。';renderHarnessUpdate();refreshHarnessUpdateStatus();showDialog('settings-dialog');}
 document.querySelectorAll('dialog').forEach(dialog=>{dialog.addEventListener('close',()=>{if(dialog.id==='settings-dialog')$('api-key').value='';updateBounds();});dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)dialog.close();}});});
-$('settings-form').addEventListener('submit',async e=>{e.preventDefault();const next={baseUrl:$('base-url').value.trim(),theme:$('theme-select').value};const key=$('api-key').value.trim();if(key)next.apiKey=key;try{if(desktop){const saved=await desktop.saveSettings(next);settings={...settings,baseUrl:saved.baseUrl,theme:saved.theme,hasApiKey:saved.hasApiKey};}else{delete next.apiKey;settings={...settings,...next};}updateSettingsUI();$('settings-dialog').close();toast(desktop?'设置已保存':'预览外观已更新；API 设置请在桌面应用中保存。');}catch(error){$('settings-error').textContent=cleanError(error);}});
+$('settings-form').addEventListener('submit',async e=>{e.preventDefault();const next={baseUrl:$('base-url').value.trim(),apiProtocol:$('api-protocol').value,theme:$('theme-select').value};const key=$('api-key').value.trim();if(key)next.apiKey=key;try{if(desktop){const saved=await desktop.saveSettings(next);settings={...settings,baseUrl:saved.baseUrl,theme:saved.theme,apiProtocol:saved.apiProtocol,hasApiKey:saved.hasApiKey};}else{delete next.apiKey;settings={...settings,...next};}updateSettingsUI();$('settings-dialog').close();toast(desktop?'设置已保存':'预览外观已更新；API 设置请在桌面应用中保存。');}catch(error){$('settings-error').textContent=cleanError(error);}});
 function renderSearch(){const query=$('search-input').value.toLowerCase();const found=sessions.filter(s=>`${s.title} ${s.messages.map(m=>m.content).join(' ')}`.toLowerCase().includes(query));$('search-results').innerHTML=found.length?found.map(s=>`<button data-session="${escapeHTML(s.id)}">${escapeHTML(s.title)}<small>${escapeHTML(s.messages.find(m=>m.role==='user')?.displayContent||s.messages.find(m=>m.role==='user')?.content||'')}</small></button>`).join(''):'<div class="search-empty">'+(query?'没有找到相关对话':'还没有对话，试着发起第一个问题吧')+'</div>';}
 $('search-input').addEventListener('input',renderSearch);
 function renderAttachment(){$('attachment-chip').classList.toggle('hidden',!attachment);$('attachment-chip').innerHTML=attachment?`<span>📎 ${escapeHTML(attachment.name)} · ${(attachment.size/1024).toFixed(1)} KB</span><button data-action="remove-attachment" aria-label="移除附件">×</button>`:'';}

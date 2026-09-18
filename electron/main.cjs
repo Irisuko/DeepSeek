@@ -208,6 +208,8 @@ function wireIPC() {
     const thinking = validateThinking(request.thinking === undefined ? storage.settings.thinking : request.thinking);
     const messages = validateMessages(request.messages);
     const baseUrl = storage.settings.baseUrl;
+    const apiProtocol = storage.settings.apiProtocol;
+    const modelProfiles = storage.settings.modelProfiles;
     const controller = new AbortController();
     const entry = { owner: event.sender.id, controller, cancelled: false };
     activeRequests.set(request.requestId, entry);
@@ -218,7 +220,7 @@ function wireIPC() {
     setImmediate(async () => {
       const timeout = setTimeout(() => controller.abort(new Error('timeout')), 10 * 60 * 1000);
       try {
-        await streamChat({ baseUrl, apiKey, model, thinking, messages, signal: controller.signal, onEvent: emit });
+        await streamChat({ baseUrl, apiKey, model, thinking, apiProtocol, modelProfiles, messages, signal: controller.signal, onEvent: emit });
         emit({ type: 'done' });
       } catch (error) {
         if (entry.cancelled) emit({ type: 'done', cancelled: true });

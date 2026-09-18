@@ -14,12 +14,32 @@
 
 ### Chat
 
-1. 打开左下角「设置」，填写自己的 DeepSeek API Key。
-2. 默认 API 地址为 `https://api.deepseek.com`，保存连接设置。
-3. 在对话输入栏底部的模型下拉框中选择 DeepSeek Flash 或 DeepSeek V4 Pro，选择会自动保存；同一输入栏可独立开启「深度思考」。
-4. 输入消息即可发送。可停止生成、查看思考内容、搜索历史、复制回复及导出 Markdown。
+1. 打开「设置」，选择 DeepSeek 官方、OpenCode Zen / Go、OpenAI、Anthropic 或自定义平台，填写该平台的 API Key。
+2. 设置 API 基础地址和接口类型。支持 Chat Completions、Responses、Messages；完整接口地址也可填写，不会重复拼接路径。OpenCode 自动按 DeepSeek / GPT / Claude 模型选择接口。
+3. 在**对话输入栏**选择模型。「＋ 添加模型…」支持自定义模型 ID；旁边的配置按钮可设置该模型的接口与思考参数。候选项仅是便捷入口，实际可用性和费用由平台账户决定。
+4. 输入消息即可发送。可停止生成、查看平台返回的思考内容、搜索历史、复制回复及导出 Markdown。
 
-Chat 支持添加不超过 128 KB 的文本或代码附件；附件内容随消息发送给配置的 API。对话历史保存在本机，Chat API Key 使用系统安全存储加密后保存。
+#### OpenCode Zen 示例
+
+API 基础地址为 `https://opencode.ai/zen/v1`，接口选择「自动」，密钥使用 OpenCode 的 API Key。
+
+| 模型 ID | 自动接口 |
+| --- | --- |
+| `deepseek-v4-flash` | Chat Completions |
+| `deepseek-v4-pro` | Chat Completions |
+| `gpt-5.4` | Responses |
+| `claude-sonnet-4-6` | Messages |
+
+模型 ID 以[平台文档](https://opencode.ai/docs/zen/#endpoints)为准；OpenCode Go 使用 `https://opencode.ai/zen/go/v1`，需确认订阅支持目标模型。DeepSeek 官方 Flash 的 ID 是 `deepseek-flash`，不同于 OpenCode。
+
+#### 思考与兼容性
+
+- DeepSeek 官方继续使用原有深度思考开关。其他平台默认不发送专属参数，由服务决定思考行为。
+- 支持思考的自定义模型可配置 DeepSeek thinking、Responses reasoning（medium）、Claude adaptive 或 budget（2048），然后在输入栏开关。Responses / Claude 关闭开关时恢复平台默认，不强制关闭模型自身推理。需要按平台文档选择支持的格式。
+- 当前支持文本多轮对话与流式回复；Claude 回复上限为 8192 tokens。此改动不增加图片理解、工具调用或联网搜索。
+- 当前保存一个活动平台连接。更换地址的源（协议、域名或端口）时需填写该平台密钥；留空会清除旧连接密钥，防止误发给新平台。同一平台切换接口路径可继续使用原密钥。
+
+Chat 支持添加不超过 128 KB 的文本或代码附件；附件内容随消息发送给配置的 API。对话历史保存在本机，Chat API Key 使用系统安全存储加密后保存。Chat 与 Harness 的连接互相独立。
 
 ### Harness
 

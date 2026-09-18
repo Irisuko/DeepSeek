@@ -26,3 +26,5 @@
 .title-actions{flex-shrink:0}
 body[data-mode=codex] [data-chat-only]{display:none}
 @media(max-width:760px){.header-brand{display:none}.header-mode-switch{width:176px}.title-left{gap:7px}}
+
+.model-dialog{width:480px}.model-dialog .settings-fields{overflow:auto}.model-dialog #model-error{color:#be6b63;font-size:12px}.composer-model{max-width:210px}.composer-model select{max-width:210px}

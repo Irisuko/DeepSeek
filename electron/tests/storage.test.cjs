@@ -91,3 +91,17 @@ test('Legacy official model settings migrate without rewriting custom provider m
   await store.initialize();
   assert.equal(store.publicSettings().model, 'deepseek-reasoner');
 });
+
+test('Connection protocol and custom models persist; invalid profiles cannot overwrite settings',async t=>{
+  const fs2=require('node:fs/promises'),os=require('node:os'),path2=require('node:path');
+  const dir=await fs2.mkdtemp(path2.join(os.tmpdir(),'deepseek-platforms-'));t.after(()=>fs2.rm(dir,{recursive:true,force:true}));
+  const safe={isEncryptionAvailable:()=>true,encryptString:s=>Buffer.from(s),decryptString:b=>b.toString()};
+  const store=new Storage(dir,safe);await store.initialize();
+  const modelProfiles=[{model:'custom/claude',protocol:'messages',thinkingMode:'budget'}];
+  await store.saveSettings({apiKey:'secret',apiProtocol:'messages',modelProfiles,model:'custom/claude'});
+  await assert.rejects(store.saveSettings({modelProfiles:[{model:'bad',protocol:'responses',thinkingMode:'budget'}]}));
+  const reloaded=new Storage(dir,safe);await reloaded.initialize();assert.deepEqual(reloaded.publicSettings().modelProfiles,modelProfiles);assert.equal(reloaded.publicSettings().apiProtocol,'messages');
+  await store.saveSettings({baseUrl:'https://api.deepseek.com/v1'});assert.equal(store.getApiKey(),'secret');
+  await store.saveSettings({baseUrl:'https://other.example/v1'});assert.equal(store.publicSettings().hasApiKey,false);
+  await store.saveSettings({baseUrl:'https://third.example/v1',apiKey:'new-secret'});assert.equal(store.getApiKey(),'new-secret');
+});
