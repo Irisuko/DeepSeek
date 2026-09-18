@@ -11,7 +11,8 @@
     "test": "node --test electron/*.test.cjs electron/tests/*.test.cjs",
     "pack": "electron-builder --dir",
     "dist": "electron-builder --win nsis",
-    "postinstall": "node node_modules/electron/install.js"
+    "postinstall": "node node_modules/electron/install.js",
+    "setup:updater": "node scripts/setup-updater.cjs"
   },
   "dependencies": {
     "dompurify": "3.4.15",
@@ -19,7 +20,8 @@
   },
   "devDependencies": {
     "electron": "44.3.0",
-    "electron-builder": "26.15.3"
+    "electron-builder": "26.15.3",
+    "tar": "7.5.22"
   },
   "build": {
     "appId": "studio.deepseek.personal",
@@ -49,6 +51,24 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "runtime/npm",
+        "to": "runtime/npm",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "runtime/npm/node_modules",
+        "to": "runtime/npm/node_modules",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "electron/harness-runtime-check.cjs",
+        "to": "support/harness-runtime-check.cjs"
       }
     ],
     "win": {

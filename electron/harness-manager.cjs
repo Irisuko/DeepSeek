@@ -44,17 +44,18 @@ function parseReadyUrl(line) {
 }
 
 /** Own one official Harness Web process; the renderer never receives filesystem or spawn access. */
-function createHarnessManager({ runtimeRoot, dataDir, onStatus = () => {} }) {
+function createHarnessManager({ runtimeRoot, dataDir, nodePath: runtimeNodePath, expectedVersion = SUPPORTED_HARNESS_VERSION, onStatus = () => {} }) {
   if (!path.isAbsolute(runtimeRoot) || !path.isAbsolute(dataDir)) {
     throw new Error('Harness runtimeRoot 和 dataDir 必须是绝对路径。');
   }
-  const nodePath = path.join(runtimeRoot, process.platform === 'win32' ? 'node.exe' : 'node');
+  const nodePath = runtimeNodePath || path.join(runtimeRoot, process.platform === 'win32' ? 'node.exe' : 'node');
+  if (!path.isAbsolute(nodePath) || typeof expectedVersion !== 'string' || !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?(?:\+[a-zA-Z0-9.-]+)?$/.test(expectedVersion)) throw new Error('Harness 运行时配置无效。');
   const packageRoot = path.join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh');
   const cliPath = path.join(packageRoot, 'lib', 'bin.js');
   const harnessHome = path.join(dataDir, 'harness-home');
   let current = null;
   let revision = 0;
-  let status = { state: 'stopped', message: 'Harness 尚未启动', workspace: null, origin: null, version: SUPPORTED_HARNESS_VERSION };
+  let status = { state: 'stopped', message: 'Harness 尚未启动', workspace: null, origin: null, version: expectedVersion };
 
   function publish(patch) {
     status = { ...status, ...patch };
@@ -64,11 +65,11 @@ function createHarnessManager({ runtimeRoot, dataDir, onStatus = () => {} }) {
 
   function validateRuntime() {
     if (!fs.existsSync(nodePath) || !fs.existsSync(cliPath)) {
-      throw new Error('Harness 运行环境尚未安装。请先运行 npm run setup:harness。');
+      throw new Error('Harness 运行环境不完整，请恢复上一引擎或重新安装桌面应用。');
     }
     const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
-    if (manifest.version !== SUPPORTED_HARNESS_VERSION) {
-      throw new Error(`Harness 版本不匹配：需要 ${SUPPORTED_HARNESS_VERSION}，当前为 ${sanitizeOutput(manifest.version)}。请重新运行 npm run setup:harness。`);
+    if (manifest.version !== expectedVersion) {
+      throw new Error('Harness 运行时校验失败，请恢复上一引擎或重新安装桌面应用。');
     }
     fs.mkdirSync(harnessHome, { recursive: true });
   }
@@ -227,7 +228,7 @@ function createHarnessManager({ runtimeRoot, dataDir, onStatus = () => {} }) {
     if (current) await stopRecord(current);
   }
 
-  return { start, stop, getStatus: () => ({ ...status }) };
+  return { start, stop, isActive: () => Boolean(current && !current.exited), getStatus: () => ({ ...status }) };
 }
 
 module.exports = { createHarnessManager, SUPPORTED_HARNESS_VERSION, sanitizeOutput, parseReadyUrl };

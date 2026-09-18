@@ -22,3 +22,7 @@ harness-home/
 
 # Installer copy at the project root
 /DeepSeek.exe
+
+# Bundled updater tooling is recreated by setup:updater
+runtime/npm/
+runtime/.npm-setup-*/

@@ -29,4 +29,10 @@ contextBridge.exposeInMainWorld('desktop', Object.freeze({
   connectHarness: () => ipcRenderer.invoke('desktop:connect-harness'),
   disconnectHarness: () => ipcRenderer.invoke('desktop:disconnect-harness'),
   onHarnessStatus: (callback) => subscribe('desktop:harness-status', callback),
+  getHarnessUpdateStatus: () => ipcRenderer.invoke('desktop:harness-update-status'),
+  checkHarnessUpdate: () => ipcRenderer.invoke('desktop:harness-check-update'),
+  updateHarness: () => ipcRenderer.invoke('desktop:harness-update'),
+  cancelHarnessUpdate: () => ipcRenderer.invoke('desktop:harness-cancel-update'),
+  rollbackHarness: () => ipcRenderer.invoke('desktop:harness-rollback'),
+  onHarnessUpdateStatus: (callback) => subscribe('desktop:harness-update-event', callback),
 }));

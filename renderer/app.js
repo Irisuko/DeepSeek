@@ -14,6 +14,8 @@ document.querySelectorAll('[data-icon]').forEach(el=>el.innerHTML=icon(el.datase
 const desktop=window.desktop;
 let settings={model:'deepseek-flash',thinking:false,baseUrl:'https://api.deepseek.com',theme:'system',hasApiKey:false,workspace:null};
 let sessions=[],currentId=null,mode='chat',attachment=null,engineState='stopped',pendingDelete=null,toastTimer,saveTimer,modelSaving=false;
+let harnessUpdateStatus={state:'idle',busy:false,message:'',canRollback:false,prerelease:false};
+let harnessUpdatePending=false,harnessUpdateCancelling=false,harnessUpdateEpoch=0;
 const requests=new Map();
 const escapeHTML=(s)=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const cleanError=e=>(e.message||String(e)).replace(/^Error invoking remote method '[^']+': Error: /,'');
@@ -65,12 +67,80 @@ function selectSession(id){currentId=id;attachment=null;$('prompt').value='';ren
 async function sendMessage(){const running=currentRequest();if(running){await desktop?.cancelChat(running[0]);return;}const prompt=$('prompt').value.trim();if(!prompt)return;if(!desktop){toast('请在桌面应用中配置 API Key 后发送消息。');openSettings();return;}if(!settings.hasApiKey){openSettings();$('settings-error').textContent='请先添加 API Key，保存后再发送。';return;}let session=current();if(!session){if(sessions.length>=500){toast('最多保存 500 个对话，请先导出并删除部分旧对话。');return;}session={id:crypto.randomUUID(),title:prompt.slice(0,28),createdAt:Date.now(),updatedAt:Date.now(),messages:[]};sessions.unshift(session);currentId=session.id;}const fullContent=attachment?`${prompt}\n\n附件 ${attachment.name}：\n\n${attachment.text}`:prompt;session.messages.push({role:'user',content:fullContent,displayContent:attachment?`${prompt}\n📎 ${attachment.name}`:prompt});const apiMessages=session.messages.filter(m=>m.content&&!m.error).map(m=>({role:m.role,content:m.content}));const assistant={role:'assistant',content:'',reasoning:'',pending:true};session.messages.push(assistant);const requestId=crypto.randomUUID();requests.set(requestId,{sessionId:session.id,assistant});session.updatedAt=Date.now();$('prompt').value='';$('prompt').style.height='';attachment=null;renderAttachment();renderHistory();renderMessages(true);queueSave();try{await desktop.chat({requestId,messages:apiMessages,model:settings.model,thinking:settings.thinking});}catch(e){assistant.pending=false;assistant.error=cleanError(e);requests.delete(requestId);renderMessages(true);queueSave();}}
 let streamRender=false;
 desktop?.onChatEvent(event=>{const req=requests.get(event.requestId);if(!req)return;const message=req.assistant;if(event.type==='delta')message.content+=event.text||'';if(event.type==='reasoning')message.reasoning+=event.text||'';if(event.type==='done'||event.type==='error'){message.pending=false;message.cancelled=event.cancelled||false;if(event.type==='error')message.error=event.text;requests.delete(event.requestId);queueSave();}if(req.sessionId===currentId&&!streamRender){streamRender=true;requestAnimationFrame(()=>{streamRender=false;const el=$('conversation-scroll');const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<120;renderMessages(nearBottom);});}});
-function engineStatus(status){engineState=status.state;const names={stopped:'Harness 待启动',starting:'Harness 启动中',running:'Harness 已连接',stopping:'Harness 正在停止',error:'Harness 连接异常'};const label=names[status.state]||'Harness 待启动';$('engine-mini-label').textContent=label;$('settings-engine-label').textContent=label;$('engine-bar-label').textContent=status.workspace?`Harness · ${status.workspace.split(/[\\/]/).pop()}`:label;['engine-dot','settings-engine-dot'].forEach(id=>{$(id).className=`status-dot ${status.state==='running'?'active':status.state==='starting'?'starting':status.state==='error'?'error':''}`;});$('code-landing').classList.toggle('hidden',status.state==='running');$('harness-host').classList.toggle('hidden',status.state!=='running');$('engine-bar').classList.toggle('hidden',status.state!=='running');$('start-engine').disabled=['starting','stopping'].includes(status.state);$('start-engine').innerHTML=icon('play')+(status.state==='starting'?'正在启动，首次可能需要几分钟…':status.state==='error'?'重新打开工作区':'打开编程工作区');$('engine-explanation').textContent=status.state==='error'?status.message:status.state==='starting'?'正在加载官方 Harness 插件与本地运行环境，请稍候。':'首次进入后，在 Harness 设置中配置模型，即可开始任务。';updateBounds();}
+function engineStatus(status){engineState=status.state;const names={stopped:'Harness 待启动',starting:'Harness 启动中',running:'Harness 已连接',stopping:'Harness 正在停止',error:'Harness 连接异常'};const label=names[status.state]||'Harness 待启动';$('engine-mini-label').textContent=label;$('settings-engine-label').textContent=label;$('engine-bar-label').textContent=status.workspace?`Harness · ${status.workspace.split(/[\\/]/).pop()}`:label;['engine-dot','settings-engine-dot'].forEach(id=>{$(id).className=`status-dot ${status.state==='running'?'active':status.state==='starting'?'starting':status.state==='error'?'error':''}`;});$('code-landing').classList.toggle('hidden',status.state==='running');$('harness-host').classList.toggle('hidden',status.state!=='running');$('engine-bar').classList.toggle('hidden',status.state!=='running');$('start-engine').disabled=harnessUpdateBusy()||['starting','stopping'].includes(status.state);$('start-engine').innerHTML=icon('play')+(status.state==='starting'?'正在启动，首次可能需要几分钟…':status.state==='error'?'重新打开工作区':'打开编程工作区');$('engine-explanation').textContent=status.state==='error'?status.message:status.state==='starting'?'正在加载官方 Harness 插件与本地运行环境，请稍候。':'首次进入后，在 Harness 设置中配置模型，即可开始任务。';renderHarnessUpdate();updateBounds();}
 desktop?.onHarnessStatus(engineStatus);
+function harnessUpdateBusy(){return harnessUpdatePending||Boolean(harnessUpdateStatus.busy);}
+function engineBlocksUpdate(){return ['running','starting','stopping'].includes(engineState);}
+function renderHarnessUpdate(){
+  const status=harnessUpdateStatus;
+  const busy=harnessUpdateBusy();
+  const blocked=engineBlocksUpdate();
+  const labels={idle:'可检查官方发布，或直接更新。',checking:'正在检查官方最新发布…',available:'发现可用的官方更新。',current:'当前引擎已是官方最新发布。',downloading:'正在下载官方 Harness…',installing:'正在准备新的引擎…',validating:'正在验证引擎能否正常运行…',ready:'引擎已更新，可以打开编程工作区。',error:'更新未完成，请重试。',cancelled:'已取消更新，原有引擎仍可使用。'};
+  // Keep technical release identifiers out of this versionless interface.
+  const message=String(status.message||labels[status.state]||labels.idle).replace(/\bv?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\b/g,'对应发布');
+  $('harness-update-message').textContent=message;
+  $('harness-update-status').dataset.state=status.state;
+  $('harness-update-dot').className='status-dot '+(busy?'starting':status.state==='error'?'error':['ready','current'].includes(status.state)?'active':'');
+  $('harness-update').setAttribute('aria-busy',String(busy));
+  $('harness-update-preview').classList.toggle('hidden',!status.prerelease);
+  $('check-harness-update').disabled=!desktop||busy;
+  $('update-harness').disabled=!desktop||busy||blocked;
+  $('update-harness').title=blocked?'请结束任务并停止引擎后再更新':'';
+  $('cancel-harness-update').classList.toggle('hidden',!busy);
+  $('cancel-harness-update').disabled=!desktop||harnessUpdateCancelling;
+  $('cancel-harness-update').textContent=harnessUpdateCancelling?'正在取消…':'取消更新';
+  $('rollback-harness').classList.toggle('hidden',!status.canRollback);
+  $('rollback-harness').disabled=!desktop||busy||blocked;
+  $('rollback-harness').title=blocked?'请结束任务并停止引擎后再恢复':'';
+  $('harness-update-running-note').classList.toggle('hidden',!blocked);
+  $('harness-update-running-note').textContent=engineState==='stopping'?'正在停止引擎，请稍候再更新或恢复。':engineState==='starting'?'请等待引擎启动完成，结束任务并停止引擎后再更新或恢复。':'请先结束正在运行的任务，再点击“停止引擎”，然后更新或恢复。';
+  $('settings-stop-engine').classList.toggle('hidden',engineState!=='running');
+  $('start-engine').disabled=busy||['starting','stopping'].includes(engineState);
+}
+function receiveHarnessUpdateStatus(status){
+  if(!status||typeof status.state!=='string')return;
+  harnessUpdateEpoch++;
+  harnessUpdateStatus={...harnessUpdateStatus,...status};
+  renderHarnessUpdate();
+}
+desktop?.onHarnessUpdateStatus(receiveHarnessUpdateStatus);
+async function refreshHarnessUpdateStatus(){
+  if(!desktop){renderHarnessUpdate();return;}
+  const epoch=harnessUpdateEpoch;
+  try{
+    const status=await desktop.getHarnessUpdateStatus();
+    if(epoch===harnessUpdateEpoch)receiveHarnessUpdateStatus(status);
+  }catch(error){
+    if(epoch===harnessUpdateEpoch)receiveHarnessUpdateStatus({state:'error',busy:false,message:cleanError(error)});
+  }
+}
+async function runHarnessUpdate(action){
+  if(!desktop||harnessUpdateBusy())return;
+  if(action!=='check'&&engineBlocksUpdate()){toast('请先结束任务并停止 Harness 引擎。');return;}
+  harnessUpdatePending=true;
+  renderHarnessUpdate();
+  try{
+    const method=action==='check'?'checkHarnessUpdate':action==='rollback'?'rollbackHarness':'updateHarness';
+    receiveHarnessUpdateStatus(await desktop[method]());
+  }catch(error){
+    receiveHarnessUpdateStatus({state:'error',busy:false,message:cleanError(error)});
+  }finally{
+    harnessUpdatePending=false;
+    renderHarnessUpdate();
+  }
+}
+async function cancelHarnessUpdate(){
+  if(!desktop||!harnessUpdateBusy()||harnessUpdateCancelling)return;
+  harnessUpdateCancelling=true;
+  renderHarnessUpdate();
+  try{receiveHarnessUpdateStatus(await desktop.cancelHarnessUpdate());}
+  catch(error){toast(cleanError(error));}
+  finally{harnessUpdateCancelling=false;renderHarnessUpdate();}
+}
 async function workspace(){if(!desktop){toast('选择本地项目需要使用桌面应用。');return;}const selected=await desktop.chooseWorkspace();if(selected){settings.workspace=selected;updateSettingsUI();setMode('codex');if(engineState==='running')toast('已选择新项目；停止当前引擎后重新打开即可切换。');}}
-async function connect(){if(!desktop){toast('请启动桌面应用后打开 Harness 工作区。');return;}if(!settings.workspace){await workspace();if(!settings.workspace)return;}await desktop.connectHarness();}
+async function connect(){if(harnessUpdateBusy()){toast('请等待引擎更新完成，或先取消更新。');return;}if(!desktop){toast('请启动桌面应用后打开 Harness 工作区。');return;}if(!settings.workspace){await workspace();if(!settings.workspace)return;}await desktop.connectHarness();}
 async function showDialog(id){if(desktop)await desktop.setHarnessVisible(false);$(id).showModal();}
-function openSettings(){$('api-key').value='';$('api-key').placeholder=settings.hasApiKey?'已保存 · 留空保持现有密钥':'sk-…';$('base-url').value=settings.baseUrl;$('theme-select').value=settings.theme;$('settings-error').textContent='';$('key-state').textContent=settings.hasApiKey?'密钥已加密保存，填写新密钥可替换。':'密钥加密保存在当前电脑，不会显示在历史记录中。';showDialog('settings-dialog');}
+function openSettings(){$('api-key').value='';$('api-key').placeholder=settings.hasApiKey?'已保存 · 留空保持现有密钥':'sk-…';$('base-url').value=settings.baseUrl;$('theme-select').value=settings.theme;$('settings-error').textContent='';$('key-state').textContent=settings.hasApiKey?'密钥已加密保存，填写新密钥可替换。':'密钥加密保存在当前电脑，不会显示在历史记录中。';renderHarnessUpdate();refreshHarnessUpdateStatus();showDialog('settings-dialog');}
 document.querySelectorAll('dialog').forEach(dialog=>{dialog.addEventListener('close',()=>{if(dialog.id==='settings-dialog')$('api-key').value='';updateBounds();});dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)dialog.close();}});});
 $('settings-form').addEventListener('submit',async e=>{e.preventDefault();const next={baseUrl:$('base-url').value.trim(),theme:$('theme-select').value};const key=$('api-key').value.trim();if(key)next.apiKey=key;try{if(desktop){const saved=await desktop.saveSettings(next);settings={...settings,baseUrl:saved.baseUrl,theme:saved.theme,hasApiKey:saved.hasApiKey};}else{delete next.apiKey;settings={...settings,...next};}updateSettingsUI();$('settings-dialog').close();toast(desktop?'设置已保存':'预览外观已更新；API 设置请在桌面应用中保存。');}catch(error){$('settings-error').textContent=cleanError(error);}});
 function renderSearch(){const query=$('search-input').value.toLowerCase();const found=sessions.filter(s=>`${s.title} ${s.messages.map(m=>m.content).join(' ')}`.toLowerCase().includes(query));$('search-results').innerHTML=found.length?found.map(s=>`<button data-session="${escapeHTML(s.id)}">${escapeHTML(s.title)}<small>${escapeHTML(s.messages.find(m=>m.role==='user')?.displayContent||s.messages.find(m=>m.role==='user')?.content||'')}</small></button>`).join(''):'<div class="search-empty">'+(query?'没有找到相关对话':'还没有对话，试着发起第一个问题吧')+'</div>';}
@@ -78,7 +148,7 @@ $('search-input').addEventListener('input',renderSearch);
 function renderAttachment(){$('attachment-chip').classList.toggle('hidden',!attachment);$('attachment-chip').innerHTML=attachment?`<span>📎 ${escapeHTML(attachment.name)} · ${(attachment.size/1024).toFixed(1)} KB</span><button data-action="remove-attachment" aria-label="移除附件">×</button>`:'';}
 $('file-input').addEventListener('change',async e=>{const file=e.target.files[0];if(!file)return;if(file.size>128*1024){toast('请添加 128 KB 以内的文本或代码文件。');e.target.value='';return;}const text=await file.text();if(text.includes('\u0000')){toast('暂时仅支持文本和代码文件。');return;}attachment={name:file.name,text,size:file.size};renderAttachment();e.target.value='';});
 async function exportHistory(){const content=sessions.map(s=>`# ${s.title}\n\n${s.messages.map(m=>`## ${m.role==='user'?'你':'DeepSeek'}\n\n${m.content}${m.reasoning?'\n\n<details><summary>思考过程</summary>\n\n'+m.reasoning+'\n\n</details>':''}`).join('\n\n')}`).join('\n\n---\n\n');if(desktop){const result=await desktop.exportHistory({content:content||'# DeepSeek\n\n暂无对话。',filename:'DeepSeek-对话-'+new Date().toISOString().slice(0,10)+'.md'});if(result.saved)toast('对话已导出。');return;}const blob=new Blob([content||'# DeepSeek\n\n暂无对话。'],{type:'text/markdown;charset=utf-8'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`DeepSeek-对话-${new Date().toISOString().slice(0,10)}.md`;a.click();setTimeout(()=>URL.revokeObjectURL(url),3000);}
-const actions={chat:()=>setMode('chat'),codex:()=>setMode('codex'),new:newChat,sidebar:()=>{$('app').classList.toggle('sidebar-collapsed');updateBounds();},settings:openSettings,search:()=>{$('search-input').value='';renderSearch();showDialog('search-dialog');},workspace,connect,disconnect:()=>desktop?.disconnectHarness(),send:sendMessage,attach:()=>$('file-input').click(),'remove-attachment':()=>{attachment=null;renderAttachment();},think:async()=>{settings.thinking=!settings.thinking;updateSettingsUI();if(desktop)await desktop.saveSettings({thinking:settings.thinking});},theme:async()=>{settings.theme=document.body.dataset.theme==='dark'?'light':'dark';applyTheme();if(desktop)await desktop.saveSettings({theme:settings.theme});},export:exportHistory,'delete-key':async()=>{if(desktop){const saved=await desktop.saveSettings({apiKey:''});settings.hasApiKey=saved.hasApiKey;openSettingsFieldsOnly();toast('API Key 已移除。');}else toast('预览中没有保存密钥。');}};
+const actions={chat:()=>setMode('chat'),codex:()=>setMode('codex'),new:newChat,sidebar:()=>{$('app').classList.toggle('sidebar-collapsed');updateBounds();},settings:openSettings,search:()=>{$('search-input').value='';renderSearch();showDialog('search-dialog');},workspace,connect,disconnect:()=>desktop?.disconnectHarness(),'check-harness-update':()=>runHarnessUpdate('check'),'update-harness':()=>runHarnessUpdate('update'),'cancel-harness-update':cancelHarnessUpdate,'rollback-harness':()=>runHarnessUpdate('rollback'),send:sendMessage,attach:()=>$('file-input').click(),'remove-attachment':()=>{attachment=null;renderAttachment();},think:async()=>{settings.thinking=!settings.thinking;updateSettingsUI();if(desktop)await desktop.saveSettings({thinking:settings.thinking});},theme:async()=>{settings.theme=document.body.dataset.theme==='dark'?'light':'dark';applyTheme();if(desktop)await desktop.saveSettings({theme:settings.theme});},export:exportHistory,'delete-key':async()=>{if(desktop){const saved=await desktop.saveSettings({apiKey:''});settings.hasApiKey=saved.hasApiKey;openSettingsFieldsOnly();toast('API Key 已移除。');}else toast('预览中没有保存密钥。');}};
 function openSettingsFieldsOnly(){$('api-key').value='';$('api-key').placeholder='sk-…';$('key-state').textContent='尚未配置 API Key。';}
 document.addEventListener('click',async e=>{const el=e.target.closest('button,a');if(!el)return;try{if(el.dataset.close){$(el.dataset.close).close();return;}if(el.dataset.action){await actions[el.dataset.action]?.();return;}if(el.dataset.window){if(desktop)await desktop.windowControl(el.dataset.window);return;}if(el.dataset.prompt){$('prompt').value=el.dataset.prompt;$('prompt').focus();return;}if(el.dataset.session){if($('search-dialog').open)$('search-dialog').close();selectSession(el.dataset.session);return;}if(el.dataset.delete){pendingDelete=el.dataset.delete;showDialog('confirm-dialog');return;}if(el.dataset.copy){await navigator.clipboard.writeText(current().messages[Number(el.dataset.copy)].content);toast('回复已复制。');return;}if(el.tagName==='A'){if(el.hasAttribute('download'))return;e.preventDefault();if(desktop)await desktop.openExternal(el.href);else toast('项目地址：https://github.com/deepseek-ai/deepseek-harness');}}catch(error){toast(cleanError(error));}});
 $('confirm-delete').addEventListener('click',async()=>{for(const [id,r]of requests)if(r.sessionId===pendingDelete){await desktop?.cancelChat(id);requests.delete(id);}sessions=sessions.filter(s=>s.id!==pendingDelete);if(currentId===pendingDelete)currentId=null;$('confirm-dialog').close();renderHistory();renderMessages();queueSave();});
@@ -88,5 +158,6 @@ document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLower
 window.addEventListener('beforeunload',()=>{if(!desktop){clearTimeout(saveTimer);persist();}});
 async function initialize(){try{if(desktop){[settings,sessions]=await Promise.all([desktop.getSettings(),desktop.getHistory()]);}else sessions=JSON.parse(localStorage.getItem('deepseek-studio-preview')||'[]');if(!Array.isArray(sessions))sessions=[];sessions=sessions.filter(s=>s&&typeof s.id==='string'&&Array.isArray(s.messages));for(const s of sessions)for(const m of s.messages)if(m.pending){m.pending=false;m.cancelled=true;}}catch(error){toast(cleanError(error));}updateSettingsUI();renderHistory();renderMessages();updateBounds();}
 initialize();
+refreshHarnessUpdateStatus();
 
 desktop?.onBeforeClose(async()=>{clearTimeout(saveTimer);await persist();await desktop.finishClose();});

@@ -1,12 +1,14 @@
 'use strict';
 
-const { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, safeStorage, nativeTheme } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, safeStorage, nativeTheme, net } = require('electron');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { Storage, atomicWrite } = require('./storage.cjs');
 const { streamChat, validateMessages, validateModel, validateThinking, validateHarnessUrl } = require('./chat-client.cjs');
 const { createHarnessManager } = require('./harness-manager.cjs');
 const { configureAppIdentity } = require('./app-identity.cjs');
+const { createHarnessUpdater } = require('./harness-updater.cjs');
+const { createHarnessRuntimeValidator } = require('./harness-runtime-validator.cjs');
 
 const rendererFile = path.join(__dirname, '..', 'renderer', 'index.html');
 const rendererUrl = pathToFileURL(rendererFile).href;
@@ -14,6 +16,8 @@ const activeRequests = new Map();
 let mainWindow;
 let storage;
 let harness;
+let harnessUpdater;
+let harnessOperation = false;
 let harnessView = null;
 let mode = 'chat';
 let harnessVisible = true;
@@ -121,7 +125,36 @@ async function loadHarness(url) {
   }
 }
 
+function createCurrentHarnessManager() {
+  harness = createHarnessManager({
+    ...harnessUpdater.getRuntime(),
+    dataDir: app.getPath('userData'),
+    onStatus: status => {
+      if (status.state === 'stopped' || status.state === 'error') removeHarnessView();
+      send('desktop:harness-status', status);
+    },
+  });
+  send('desktop:harness-status', harness.getStatus());
+}
+
+async function changeHarnessRuntime(operation) {
+  if (harnessOperation || harnessUpdater.getStatus().busy) throw new Error('Harness 更新正在进行，请稍候。');
+  if (harness.isActive()) throw new Error('请先结束任务并停止 Harness 引擎，再更新或恢复。');
+  harnessOperation = true;
+  harnessGeneration += 1;
+  try {
+    const result = await operation();
+    if (!quitStarted) createCurrentHarnessManager();
+    return result;
+  } finally { harnessOperation = false; }
+}
+
 function wireIPC() {
+  handle('desktop:harness-update-status', () => harnessUpdater.getStatus());
+  handle('desktop:harness-check-update', () => harnessUpdater.check());
+  handle('desktop:harness-update', () => changeHarnessRuntime(() => harnessUpdater.update()));
+  handle('desktop:harness-cancel-update', () => harnessUpdater.cancel());
+  handle('desktop:harness-rollback', () => changeHarnessRuntime(() => harnessUpdater.rollback()));
   handle('desktop:get-settings', () => storage.publicSettings());
   handle('desktop:save-settings', async (_event, settings) => {
     const saved = await storage.saveSettings(settings);
@@ -235,6 +268,7 @@ function wireIPC() {
     return { ok: true };
   });
   handle('desktop:connect-harness', async () => {
+    if (harnessOperation || harnessUpdater.getStatus().busy) throw new Error('请等待 Harness 更新完成，或先取消更新。');
     if (!storage.settings.workspace) throw new Error('请先选择 Harness 项目文件夹。');
     const generation = ++harnessGeneration;
     try {
@@ -294,7 +328,10 @@ function createWindow() {
       for (const entry of activeRequests.values()) { entry.cancelled = true; entry.controller.abort(); }
     }
   });
-  mainWindow.webContents.on('did-finish-load', () => send('desktop:harness-status', harness.getStatus()));
+  mainWindow.webContents.on('did-finish-load', () => {
+    send('desktop:harness-status', harness.getStatus());
+    send('desktop:harness-update-event', harnessUpdater.getStatus());
+  });
   mainWindow.once('ready-to-show', () => mainWindow.show());
   mainWindow.on('resize', updateHarnessBounds);
   mainWindow.on('close', (event) => {
@@ -336,14 +373,19 @@ else {
     storage = new Storage(app.getPath('userData'), safeStorage);
     await storage.initialize();
     nativeTheme.themeSource = storage.settings.theme;
-    harness = createHarnessManager({
-      runtimeRoot: path.join(app.isPackaged ? process.resourcesPath : path.join(__dirname, '..'), 'runtime'),
+    const bundledRuntimeRoot = path.join(app.isPackaged ? process.resourcesPath : path.join(__dirname, '..'), 'runtime');
+    harnessUpdater = createHarnessUpdater({
+      bundledRuntimeRoot,
       dataDir: app.getPath('userData'),
-      onStatus: (status) => {
-        if (status.state === 'stopped' || status.state === 'error') removeHarnessView();
-        send('desktop:harness-status', status);
-      },
+      fetchImpl: (url, options) => net.fetch(url, options),
+      isHarnessStopped: () => !harness?.isActive(),
+      onStatus: status => send('desktop:harness-update-event', status),
+      validateCandidate: createHarnessRuntimeValidator({
+        smokeScript: app.isPackaged ? path.join(process.resourcesPath, 'support/harness-runtime-check.cjs') : path.join(__dirname, 'harness-runtime-check.cjs'),
+      }),
     });
+    await harnessUpdater.initialize();
+    createCurrentHarnessManager();
     wireIPC();
     createWindow();
   }).catch((error) => {
@@ -359,6 +401,6 @@ else {
     quitStarted = true;
     for (const entry of activeRequests.values()) { entry.cancelled = true; entry.controller.abort(); }
     removeHarnessView();
-    Promise.allSettled([harness.stop(), storage.queue]).finally(() => { quitReady = true; app.quit(); });
+    Promise.allSettled([harness.stop(), harnessUpdater.shutdown(), storage.queue]).finally(() => { quitReady = true; app.quit(); });
   });
 }
